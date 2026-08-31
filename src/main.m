@@ -223,6 +223,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     _gridBuf = [_device newBufferWithLength:(NSUInteger)PLANE_COUNT * _planeBytes
                                     options:MTLResourceStorageModeShared];
     if (!_gridBuf) return NO;
+    memset([_gridBuf contents], 0, PLANE_COUNT * _planeBytes);
 
     _uniformsBuf = [_device newBufferWithLength:sizeof(Uniforms) options:MTLResourceStorageModeShared];
     if (!_uniformsBuf) return NO;
