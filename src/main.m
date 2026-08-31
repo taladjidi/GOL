@@ -550,6 +550,8 @@ static NSButton *makeToggle(NSString *text, NSRect frame, BOOL on, NSInteger tag
     label.textColor = on ? [NSColor whiteColor] : [NSColor colorWithSRGBRed:0.55 green:0.60 blue:0.68 alpha:1.0];
     label.alignment = NSTextAlignmentCenter;
     label.backgroundColor = [NSColor clearColor];
+    label.selectable = NO;
+    label.editable = NO;
     [btn addSubview:label];
     
     return btn;
@@ -758,6 +760,17 @@ static NSButton *makeToggle(NSString *text, NSRect frame, BOOL on, NSInteger tag
 
     // Speed control: accumulate time, advance generations based on slider
     CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+    
+    // Update uniforms BEFORE any GPU work so shaders see correct rules
+    Uniforms *u = (Uniforms *)[_uniformsBuf contents];
+    u->gridW = (uint32_t)_gridW;
+    u->gridH = (uint32_t)_gridH;
+    u->pad = 0;
+    u->birth = (uint8_t)_rules.birth;
+    u->survival = (uint8_t)_rules.survival;
+    u->pad2 = 0;
+    u->pad3 = 0;
+    
     if (_running) {
         double genPerSec = _speedSlider ? _speedSlider.doubleValue : 30.0;
         if (genPerSec < 1.0) genPerSec = 1.0;
@@ -814,16 +827,8 @@ static NSButton *makeToggle(NSString *text, NSRect frame, BOOL on, NSInteger tag
         }
     }
 
-    // 4. Update uniforms once before encoding GPU work.
-    Uniforms *u = (Uniforms *)[_uniformsBuf contents];
-    u->gridW = (uint32_t)_gridW;
-    u->gridH = (uint32_t)_gridH;
+    // 4. Update curOffset for render pass (grid/plane may have changed)
     u->curOffset = (uint32_t)renderPlane * (uint32_t)_planeCells;
-    u->pad = 0;
-    u->birth = (uint8_t)_rules.birth;
-    u->survival = (uint8_t)_rules.survival;
-    u->pad2 = 0;
-    u->pad3 = 0;
 
     // Re-render the small cell texture only when the visible grid changed.
     BOOL needCell = willStep || _dirty;
