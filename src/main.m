@@ -531,7 +531,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 
 static NSButton *makeToggle(NSString *text, NSRect frame, BOOL on, NSInteger tag, id target, SEL action) {
     NSButton *btn = [[NSButton alloc] initWithFrame:frame];
-    btn.bezelStyle = NSBezelStyleRound;
+    btn.bezelStyle = NSBezelStyleRounded;
     btn.state = on ? NSControlStateValueOn : NSControlStateValueOff;
     btn.tag = tag;
     btn.allowsMixedState = NO;
