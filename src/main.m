@@ -531,17 +531,18 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 
 static NSButton *makeToggle(NSString *text, NSRect frame, BOOL on, NSInteger tag, id target, SEL action) {
     NSButton *btn = [[NSButton alloc] initWithFrame:frame];
-    btn.bezelStyle = NSBezelStyleRegularSquare;
+    btn.bezelStyle = NSBezelStyleRound;
     btn.state = on ? NSControlStateValueOn : NSControlStateValueOff;
     btn.tag = tag;
     btn.allowsMixedState = NO;
-    btn.contentTintColor = on ? [NSColor colorWithSRGBRed:0.3 green:0.85 blue:0.4 alpha:1.0] : [NSColor colorWithSRGBRed:0.25 green:0.28 blue:0.35 alpha:1.0];
     btn.title = @"";
     btn.wantsLayer = YES;
     btn.layer.backgroundColor = on ?
         [NSColor colorWithSRGBRed:0.3 green:0.85 blue:0.4 alpha:1.0].CGColor :
         [NSColor colorWithSRGBRed:0.22 green:0.25 blue:0.32 alpha:1.0].CGColor;
     btn.layer.cornerRadius = frame.size.width / 2.0;
+    btn.target = target;
+    btn.action = action;
     
     NSTextField *label = [NSTextField labelWithString:text];
     label.frame = NSMakeRect(0, 0, frame.size.width, frame.size.height);
@@ -571,7 +572,7 @@ static NSButton *makeToggle(NSString *text, NSRect frame, BOOL on, NSInteger tag
     [_window center];
 
     NSScreen *screen = _window.screen ?: [NSScreen mainScreen];
-    _window.minSize = NSMakeSize(400.0, 300.0 + (CGFloat)BAR_H);
+    _window.minSize = NSMakeSize(500.0, 350.0 + (CGFloat)BAR_H);
     _window.maxSize = NSMakeSize(screen.frame.size.width, screen.frame.size.height);
 
     NSView *contentView = [_window contentView];
@@ -585,69 +586,62 @@ static NSButton *makeToggle(NSString *text, NSRect frame, BOOL on, NSInteger tag
     bar.layer.backgroundColor = [NSColor colorWithSRGBRed:0.07 green:0.08 blue:0.11 alpha:1.0].CGColor;
     [contentView addSubview:bar];
     
+    CGFloat x = 12;
+    CGFloat y = 8;
+    CGFloat btnW = 24;
+    CGFloat btnH = 24;
+    CGFloat btnGap = 4;
+    
     // FPS label
-    _fpsLabel = MakeLabel(@"FPS --", NSMakeRect(12, 8, 80, 18));
+    _fpsLabel = MakeLabel(@"FPS --", NSMakeRect(x, y, 80, 18));
     [bar addSubview:_fpsLabel];
+    x += 90;
     
     // Rule section
-    CGFloat ruleX = 12;
-    CGFloat ruleY = 30;
-    CGFloat btnW = 22;
-    CGFloat btnH = 22;
-    CGFloat btnGap = 3;
-    
-    // B label
-    [bar addSubview:MakeLabelSmall(@"B", NSMakeRect(ruleX, ruleY, 14, 22))];
-    
-    // Birth toggles
+    [bar addSubview:MakeLabelSmall(@"B", NSMakeRect(x, y - 2, 14, 22))];
+    x += 18;
     for (int i = 0; i < 9; i++) {
-        CGFloat bx = ruleX + 18 + i * (btnW + btnGap);
         _ruleToggles[i] = makeToggle([NSString stringWithFormat:@"%d", i],
-                                      NSMakeRect(bx, ruleY, btnW, btnH),
+                                      NSMakeRect(x, y - 2, btnW, btnH),
                                       (_rules.birth >> i) & 1u,
                                       i, self, @selector(ruleToggled:));
-        _ruleToggles[i].autoresizingMask = NSViewMinXMargin;
         [bar addSubview:_ruleToggles[i]];
+        x += btnW + btnGap;
     }
     
-    // S label
-    CGFloat sLabelX = ruleX + 18 + 9 * (btnW + btnGap) + 8;
-    [bar addSubview:MakeLabelSmall(@"S", NSMakeRect(sLabelX, ruleY, 14, 22))];
-    
-    // Survival toggles
-    ruleY = 30;
+    x += 8;
+    [bar addSubview:MakeLabelSmall(@"S", NSMakeRect(x, y - 2, 14, 22))];
+    x += 18;
     for (int i = 0; i < 9; i++) {
-        CGFloat sx = sLabelX + 18 + i * (btnW + btnGap);
         _ruleTSurv[i] = makeToggle([NSString stringWithFormat:@"%d", i],
-                                    NSMakeRect(sx, ruleY, btnW, btnH),
+                                    NSMakeRect(x, y - 2, btnW, btnH),
                                     (_rules.survival >> i) & 1u,
                                     i + 10, self, @selector(ruleToggled:));
-        _ruleTSurv[i].autoresizingMask = NSViewMinXMargin;
         [bar addSubview:_ruleTSurv[i]];
+        x += btnW + btnGap;
     }
     
-    // Rule notation label
-    CGFloat ruleLabelX = sLabelX + 18 + 9 * (btnW + btnGap) + 8;
-    _ruleLabel = MakeLabelSmall(@"B3/S23", NSMakeRect(ruleLabelX, ruleY, 120, 22));
-    _ruleLabel.autoresizingMask = NSViewMinXMargin;
+    x += 8;
+    _ruleLabel = MakeLabelSmall(@"B3/S23", NSMakeRect(x, y - 2, 100, 22));
     [bar addSubview:_ruleLabel];
+    x += 110;
     
-    // Population stats
-    _popLabel = MakeLabelSmall(@"Pop: 0", NSMakeRect(ruleLabelX + 130, ruleY, 100, 22));
-    _popLabel.autoresizingMask = NSViewMinXMargin;
+    _popLabel = MakeLabelSmall(@"Pop: 0", NSMakeRect(x, y - 2, 90, 22));
     [bar addSubview:_popLabel];
+    x += 100;
     
-    _maxAgeLabel = MakeLabelSmall(@"MaxAge: 0", NSMakeRect(ruleLabelX + 240, ruleY, 100, 22));
-    _maxAgeLabel.autoresizingMask = NSViewMinXMargin;
+    _maxAgeLabel = MakeLabelSmall(@"Age: 0", NSMakeRect(x, y - 2, 70, 22));
     [bar addSubview:_maxAgeLabel];
+    x += 80;
     
-    // --- Second row (y = 60) ---
-    CGFloat row2Y = 60;
+    // --- Second row ---
+    y = 38;
+    x = 12;
     
-    // Density
-    [bar addSubview:MakeLabelSmall(@"Density", NSMakeRect(12, row2Y, 60, 18))];
+    [bar addSubview:MakeLabelSmall(@"Density", NSMakeRect(x, y, 55, 18))];
+    x += 60;
     
-    _densitySlider = [[NSSlider alloc] initWithFrame:NSMakeRect(72, row2Y - 4, 120, 20)];
+    _densitySlider = [[NSSlider alloc] initWithFrame:NSMakeRect(x, y - 3, 100, 20)];
     _densitySlider.minValue = 0.0;
     _densitySlider.maxValue = 1.0;
     _densitySlider.doubleValue = 0.2;
@@ -656,18 +650,17 @@ static NSButton *makeToggle(NSString *text, NSRect frame, BOOL on, NSInteger tag
     _densitySlider.continuous = YES;
     _densitySlider.target = self;
     _densitySlider.action = @selector(sliderChanged:);
-    _densitySlider.autoresizingMask = NSViewMinXMargin;
     [bar addSubview:_densitySlider];
+    x += 110;
     
-    _densityPct = MakeLabelSmall(@"20%", NSMakeRect(200, row2Y, 40, 18));
-    _densityPct.autoresizingMask = NSViewMinXMargin;
+    _densityPct = MakeLabelSmall(@"20%", NSMakeRect(x, y, 35, 18));
     [bar addSubview:_densityPct];
+    x += 45;
     
-    // Speed
-    CGFloat speedX = 260;
-    [bar addSubview:MakeLabelSmall(@"Speed", NSMakeRect(speedX, row2Y, 50, 18))];
+    [bar addSubview:MakeLabelSmall(@"Speed", NSMakeRect(x, y, 45, 18))];
+    x += 50;
     
-    _speedSlider = [[NSSlider alloc] initWithFrame:NSMakeRect(speedX + 52, row2Y - 4, 140, 20)];
+    _speedSlider = [[NSSlider alloc] initWithFrame:NSMakeRect(x, y - 3, 120, 20)];
     _speedSlider.minValue = 1.0;
     _speedSlider.maxValue = 120.0;
     _speedSlider.doubleValue = 30.0;
@@ -676,18 +669,17 @@ static NSButton *makeToggle(NSString *text, NSRect frame, BOOL on, NSInteger tag
     _speedSlider.continuous = YES;
     _speedSlider.target = self;
     _speedSlider.action = @selector(sliderChanged:);
-    _speedSlider.autoresizingMask = NSViewMinXMargin;
     [bar addSubview:_speedSlider];
+    x += 130;
     
-    _speedLabel = MakeLabelSmall(@"30 gen/s", NSMakeRect(speedX + 200, row2Y, 70, 18));
-    _speedLabel.autoresizingMask = NSViewMinXMargin;
+    _speedLabel = MakeLabelSmall(@"30 gen/s", NSMakeRect(x, y, 65, 18));
     [bar addSubview:_speedLabel];
+    x += 75;
     
-    // Presets
-    CGFloat presetX = 480;
+    [bar addSubview:MakeLabelSmall(@"Preset", NSMakeRect(x, y, 45, 18))];
+    x += 50;
     
-    // Presets popup
-    _presetsPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(presetX + 62, row2Y - 4, 130, 24)
+    _presetsPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(x, y - 3, 120, 24)
                                                  pullsDown:NO];
     [_presetsPopup addItemWithTitle:@"Glider"];
     [_presetsPopup addItemWithTitle:@"Blinker"];
@@ -698,36 +690,32 @@ static NSButton *makeToggle(NSString *text, NSRect frame, BOOL on, NSInteger tag
     [_presetsPopup addItemWithTitle:@"LWSS"];
     [_presetsPopup addItemWithTitle:@"R-Pentomino"];
     [_presetsPopup addItemWithTitle:@"Heptomino"];
-    _presetsPopup.autoresizingMask = NSViewMinXMargin;
     [_presetsPopup setTarget:self];
     [_presetsPopup setAction:@selector(rulePresetClicked:)];
     [bar addSubview:_presetsPopup];
+    x += 130;
     
-    // Go button
-    _goButton = [[NSButton alloc] initWithFrame:NSMakeRect(630, row2Y - 4, 70, 24)];
+    _goButton = [[NSButton alloc] initWithFrame:NSMakeRect(x, y - 3, 65, 24)];
     _goButton.title = @"Go";
     _goButton.bezelStyle = NSBezelStyleRounded;
     _goButton.target = self;
     _goButton.action = @selector(goPause:);
-    _goButton.autoresizingMask = NSViewMinXMargin;
     [bar addSubview:_goButton];
+    x += 75;
     
-    // Reset button
-    NSButton *resetButton = [[NSButton alloc] initWithFrame:NSMakeRect(710, row2Y - 4, 70, 24)];
+    NSButton *resetButton = [[NSButton alloc] initWithFrame:NSMakeRect(x, y - 3, 65, 24)];
     resetButton.title = @"Reset";
     resetButton.bezelStyle = NSBezelStyleRounded;
     resetButton.target = self;
     resetButton.action = @selector(reset:);
-    resetButton.autoresizingMask = NSViewMinXMargin;
     [bar addSubview:resetButton];
+    x += 75;
     
-    // Gen label
-    _genLabel = MakeLabelSmall(@"Gen 0", NSMakeRect(800, row2Y, 100, 18));
-    _genLabel.autoresizingMask = NSViewMinXMargin;
+    _genLabel = MakeLabelSmall(@"Gen 0", NSMakeRect(x, y, 90, 18));
     [bar addSubview:_genLabel];
+    x += 100;
     
-    // Help text
-    [bar addSubview:MakeLabelSmall(@"L:add  R:erase", NSMakeRect(920, row2Y, 120, 18))];
+    [bar addSubview:MakeLabelSmall(@"L:add  R:erase", NSMakeRect(x, y, 120, 18))];
     
     [self updateRuleUI];
     [_window makeKeyAndOrderFront:nil];
