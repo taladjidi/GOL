@@ -254,7 +254,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     id<MTLFunction> stepFunc = [_library newFunctionWithName:@"gol_step"];
     _stepPipeline = [_device newComputePipelineStateWithFunction:stepFunc error:&err];
     if (!_stepPipeline) {
-        NSLog(@"compute pipeline unavailable: %@; using CPU fallback", err);
+        NSLog(@"compute pipeline unavailable; using CPU fallback");
         _stepPipeline = nil;
     }
 
