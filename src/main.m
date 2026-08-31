@@ -772,6 +772,15 @@ static NSButton *makeToggle(NSString *text, NSRect frame, BOOL on, NSInteger tag
     u->pad3 = 0;
     
     if (_running) {
+        // Debug: print population every 30 frames
+        static int debugCount = 0;
+        if (debugCount++ % 30 == 0) {
+            int alive = 0, maxAge = 0;
+            gol_count_alive([self currentCells], _gridW, _gridH, &alive, &maxAge);
+            NSLog(@"[debug] gen=%u pop=%d maxAge=%d birth=0x%02x survival=0x%02x",
+                  _gen, alive, maxAge, _rules.birth, _rules.survival);
+        }
+        
         double genPerSec = _speedSlider ? _speedSlider.doubleValue : 30.0;
         if (genPerSec < 1.0) genPerSec = 1.0;
         double genInterval = 1.0 / genPerSec;
