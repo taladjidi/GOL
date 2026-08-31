@@ -4,14 +4,6 @@
 #include <string.h>
 #include <time.h>
 
-static inline uint16_t GolAge(uint16_t v) {
-    return (v >> 1) & 0x7FFFu;
-}
-
-static inline bool GolAlive(uint16_t v) {
-    return (v & 1u) != 0u;
-}
-
 GOLRules gol_default_rules(void) {
     GOLRules r = { 0 };
     r.birth = (1u << 3);           // B3
@@ -92,8 +84,8 @@ void gol_count_alive(const uint16_t *cells, int w, int h, int *alive, int *max_a
     for (size_t i = 0; i < n; i++) {
         if (GolAlive(cells[i])) {
             a++;
-            uint8_t age = GolAge(cells[i]);
-            if (age > ma) ma = (int)age;
+            uint16_t age = GolAge(cells[i]);
+            if (age > (uint16_t)ma) ma = (int)age;
         }
     }
     if (alive) *alive = a;

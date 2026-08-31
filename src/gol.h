@@ -10,9 +10,10 @@ typedef struct {
     uint8_t survival;   // bitmask: bit n set if survive on n neighbors
 } GOLRules;
 
-// Each cell is one uint16_t:
-//   bit 0      = alive
-//   bits 1..15 = age (0..32767)
+// Cell bit packing: bit 0 = alive, bits 1..15 = age (0..32767)
+static inline uint16_t GolAge(uint16_t v) { return (v >> 1) & 0x7FFFu; }
+static inline bool GolAlive(uint16_t v) { return (v & 1u) != 0u; }
+
 void gol_randomize(uint16_t *cells, size_t planeCells, int w, int h, double density);
 void gol_set_plane(uint16_t *cells, int w, int h, int x, int y, bool alive);
 void gol_step_cpu(const uint16_t *cur, uint16_t *next, int w, int h, GOLRules rules);
