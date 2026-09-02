@@ -21,6 +21,14 @@ typedef struct {
     uint8_t survival;
     uint8_t pad2;
     uint8_t pad3;
+    float viewScaleX;
+    float viewScaleY;
+    float viewOffsetX;
+    float viewOffsetY;
+    float viewWidth;
+    float viewHeight;
+    uint32_t displayMode;
+    uint32_t pad4;
 } Uniforms;
 
 static MTLSize MakeSize(int w, int h, int d) {

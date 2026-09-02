@@ -14,6 +14,14 @@ struct Uniforms {
     uchar survival;
     uchar pad2;
     uchar pad3;
+    float viewScaleX;
+    float viewScaleY;
+    float viewOffsetX;
+    float viewOffsetY;
+    float viewWidth;
+    float viewHeight;
+    uint displayMode;
+    uint pad4;
 };
 
 struct VSOut {
@@ -92,17 +100,23 @@ static float3 Viridis(float t) {
 
 // Scales the small cell texture to the drawable and draws cell gaps.
 [[fragment]] float4 fs_scale(VSOut in [[stage_in]],
-                             texture2d<float> tex [[texture(0)]],
-                             constant Uniforms &u [[buffer(0)]]) {
+                              texture2d<float> tex [[texture(0)]],
+                              constant Uniforms &u [[buffer(0)]]) {
     const float4 bg = float4(0.04f, 0.05f, 0.08f, 1.0f);
-    float2 cellF = float2(in.uv.x, 1.0f - in.uv.y) *
-        float2(static_cast<float>(u.gridW), static_cast<float>(u.gridH));
-    float2 f = fract(cellF);
+    float2 viewSize = float2(max(u.viewWidth, 1.0f), max(u.viewHeight, 1.0f));
+    float2 viewPos = float2(in.uv.x, 1.0f - in.uv.y) * viewSize;
+    float2 scale = float2(max(u.viewScaleX, 0.0f), max(u.viewScaleY, 0.0f));
+    float2 gridF = (viewPos - float2(u.viewOffsetX, u.viewOffsetY)) * scale;
+    if (gridF.x < 0.0f || gridF.x >= static_cast<float>(u.gridW) ||
+        gridF.y < 0.0f || gridF.y >= static_cast<float>(u.gridH)) {
+        return bg;
+    }
+    float2 f = fract(gridF);
     const float gap = 0.16f;
     if (f.x < gap || f.x > 1.0f - gap || f.y < gap || f.y > 1.0f - gap) {
         return bg;
     }
-    int2 icell = int2(floor(cellF));
+    int2 icell = int2(floor(gridF));
     icell = clamp(icell, int2(0, 0),
                   int2(static_cast<int>(u.gridW) - 1, static_cast<int>(u.gridH) - 1));
     return tex.read(uint2(static_cast<uint>(icell.x), static_cast<uint>(icell.y)), 0);

@@ -33,11 +33,14 @@
 static const int INITIAL_GRID_W = 160;
 static const int INITIAL_GRID_H = 120;
 static const CGFloat CELL_PX = 6.0;
+static const CGFloat MIN_CELL_PX = 1.0;
+static const CGFloat MAX_CELL_PX = 64.0;
 static const int VIEW_W = (int)(INITIAL_GRID_W * CELL_PX);
 static const int VIEW_H = (int)(INITIAL_GRID_H * CELL_PX);
 static const int BAR_H = 120;
 static const int RENDER_SCALE = 1;
 static const int PLANE_COUNT = 3;
+static const uint32_t DISPLAY_AGE = 0u;
 
 #define GOL_MIN(A, B) ((A) < (B) ? (A) : (B))
 #define GOL_MAX(A, B) ((A) > (B) ? (A) : (B))
@@ -51,6 +54,14 @@ typedef struct {
     uint8_t survival;
     uint8_t pad2;
     uint8_t pad3;
+    float viewScaleX;
+    float viewScaleY;
+    float viewOffsetX;
+    float viewOffsetY;
+    float viewWidth;
+    float viewHeight;
+    uint32_t displayMode;
+    uint32_t pad4;
 } Uniforms;
 
 static MTLSize MakeSize(int w, int h, int d) {
@@ -70,6 +81,10 @@ static int LroundInt(double value) {
     double shifted = value + (value >= 0.0 ? 0.5 : -0.5);
     double floored = floor(shifted);
     return (int)floored;
+}
+
+static double ClampDouble(double value, double lo, double hi) {
+    return GOL_MIN(GOL_MAX(value, lo), hi);
 }
 
 static NSScreen *ScreenForWindow(NSWindow *window) {
@@ -346,12 +361,44 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 @property (nonatomic, strong) GOLRangeSlider *birthRangeView;
 @property (nonatomic, strong) GOLRangeSlider *survRangeView;
 @property (nonatomic, assign) CFTimeInterval genAccum;
+@property (nonatomic, assign) CGFloat cellPx;
+@property (nonatomic, assign) CGFloat viewOffsetX;
+@property (nonatomic, assign) CGFloat viewOffsetY;
+@property (nonatomic, assign) int tool;
+@property (nonatomic, assign) int brushRadius;
+@property (nonatomic, assign) BOOL panning;
+@property (nonatomic, assign) CGFloat lastPanX;
+@property (nonatomic, assign) CGFloat lastPanY;
+@property (nonatomic, assign) uint32_t displayMode;
+@property (nonatomic, strong) NSSegmentedControl *toolControl;
+@property (nonatomic, strong) NSSlider *brushSlider;
+@property (nonatomic, strong) NSTextField *brushLabel;
+@property (nonatomic, strong) NSTextField *zoomLabel;
+@property (nonatomic, strong) NSTextField *hoverLabel;
+@property (nonatomic, strong) NSTextField *hintLabel;
+@property (nonatomic, strong) id keyMonitor;
 
 - (BOOL)setupMetal;
 - (void)setupUI;
 - (void)randomize;
 - (void)goPause:(id)sender;
-- (void)reset:(id)sender;
+- (void)clear:(id)sender;
+- (void)clear;
+- (void)fit:(id)sender;
+- (void)fitView;
+- (void)updateZoomLabel;
+- (void)updateHintLabel;
+- (void)toolChanged:(id)sender;
+- (void)beginPanAtEvent:(NSEvent *)e;
+- (void)panWithEvent:(NSEvent *)e;
+- (void)endPan;
+- (void)zoomAtEvent:(NSEvent *)e;
+- (void)hoverAtEvent:(NSEvent *)e;
+- (void)hoverExited;
+- (void)updateHoverAtPoint:(NSPoint)pt;
+- (NSPoint)topPointForEvent:(NSEvent *)e;
+- (BOOL)gridCellAtPoint:(NSPoint)pt col:(int *)outCol row:(int *)outRow;
+- (BOOL)handleKey:(NSEvent *)event;
 - (void)sliderChanged:(id)sender;
 - (void)paintAtEvent:(NSEvent *)e add:(BOOL)add;
 - (void)waitLast;
@@ -380,20 +427,103 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 
 @synthesize owner = _owner;
 
+- (BOOL)acceptsFirstResponder {
+    return YES;
+}
+
+- (BOOL)becomeFirstResponder {
+    return YES;
+}
+
 - (void)mouseDown:(NSEvent *)e {
-    [self.owner paintAtEvent:e add:YES];
+    App *owner = self.owner;
+    [self becomeFirstResponder];
+    if (owner == nil) {
+        return;
+    }
+    if (([e modifierFlags] & NSEventModifierFlagOption) != 0) {
+        [owner beginPanAtEvent:e];
+    } else {
+        [owner paintAtEvent:e add:(owner.tool == 0)];
+    }
 }
 
 - (void)mouseDragged:(NSEvent *)e {
-    [self.owner paintAtEvent:e add:YES];
+    App *owner = self.owner;
+    if (owner == nil) {
+        return;
+    }
+    if (owner.panning) {
+        [owner panWithEvent:e];
+    } else {
+        [owner paintAtEvent:e add:(owner.tool == 0)];
+    }
+}
+
+- (void)mouseUp:(NSEvent *)e {
+    App *owner = self.owner;
+    (void)e;
+    [owner endPan];
+    [self becomeFirstResponder];
 }
 
 - (void)rightMouseDown:(NSEvent *)e {
-    [self.owner paintAtEvent:e add:NO];
+    App *owner = self.owner;
+    [self becomeFirstResponder];
+    if (owner != nil) {
+        [owner paintAtEvent:e add:(owner.tool == 1)];
+    }
 }
 
 - (void)rightMouseDragged:(NSEvent *)e {
-    [self.owner paintAtEvent:e add:NO];
+    App *owner = self.owner;
+    if (owner != nil) {
+        [owner paintAtEvent:e add:(owner.tool == 1)];
+    }
+}
+
+- (void)otherMouseDown:(NSEvent *)e {
+    App *owner = self.owner;
+    [self becomeFirstResponder];
+    if (owner != nil) {
+        [owner beginPanAtEvent:e];
+    }
+}
+
+- (void)otherMouseDragged:(NSEvent *)e {
+    App *owner = self.owner;
+    if (owner != nil && owner.panning) {
+        [owner panWithEvent:e];
+    }
+}
+
+- (void)otherMouseUp:(NSEvent *)e {
+    App *owner = self.owner;
+    (void)e;
+    [owner endPan];
+    [self becomeFirstResponder];
+}
+
+- (void)scrollWheel:(NSEvent *)e {
+    App *owner = self.owner;
+    if (owner != nil) {
+        [owner zoomAtEvent:e];
+    }
+}
+
+- (void)mouseMoved:(NSEvent *)e {
+    App *owner = self.owner;
+    if (owner != nil) {
+        [owner hoverAtEvent:e];
+    }
+}
+
+- (void)mouseExited:(NSEvent *)e {
+    App *owner = self.owner;
+    (void)e;
+    if (owner != nil) {
+        [owner hoverExited];
+    }
 }
 
 @end
@@ -443,6 +573,22 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 @synthesize birthRangeView = _birthRangeView;
 @synthesize survRangeView = _survRangeView;
 @synthesize genAccum = _genAccum;
+@synthesize cellPx = _cellPx;
+@synthesize viewOffsetX = _viewOffsetX;
+@synthesize viewOffsetY = _viewOffsetY;
+@synthesize tool = _tool;
+@synthesize brushRadius = _brushRadius;
+@synthesize panning = _panning;
+@synthesize lastPanX = _lastPanX;
+@synthesize lastPanY = _lastPanY;
+@synthesize displayMode = _displayMode;
+@synthesize toolControl = _toolControl;
+@synthesize brushSlider = _brushSlider;
+@synthesize brushLabel = _brushLabel;
+@synthesize zoomLabel = _zoomLabel;
+@synthesize hoverLabel = _hoverLabel;
+@synthesize hintLabel = _hintLabel;
+@synthesize keyMonitor = _keyMonitor;
 
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
     CFTimeInterval now;
@@ -460,6 +606,15 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     self.fpsFrames = 0;
     self.genAccum = 0;
     self.rules = gol_default_rules();
+    self.cellPx = CELL_PX;
+    self.viewOffsetX = 0.0;
+    self.viewOffsetY = 0.0;
+    self.tool = 0;
+    self.brushRadius = 1;
+    self.panning = NO;
+    self.lastPanX = 0.0;
+    self.lastPanY = 0.0;
+    self.displayMode = DISPLAY_AGE;
     if (![self setupMetal]) {
         NSLog(@"Metal setup failed");
         [NSApp terminate:nil];
@@ -794,13 +949,270 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     }
 }
 
-- (void)reset:(id)sender {
+- (void)clear:(id)sender {
     (void)sender;
-    [self randomize];
+    [self clear];
+}
+
+- (void)clear {
+    uint16_t *cells;
+    uint16_t *base;
+    uint32_t p;
+
+    [self waitLast];
+    [self clearCBRing];
+    self.frameIndex = 0;
+    self.displayPlane = 0;
+    self.gen = 0;
+    self.genAccum = 0;
+    cells = [self currentCells];
+    if (cells == nil) {
+        return;
+    }
+    memset(cells, 0, self.planeBytes);
+    base = (uint16_t *)[self.gridBuf contents];
+    for (p = 1; p < (uint32_t)PLANE_COUNT; p++) {
+        memset(base + (size_t)p * (size_t)self.planeCells, 0, self.planeBytes);
+    }
+    if (self.genLabel != nil) {
+        self.genLabel.stringValue = @"Gen 0";
+    }
+    [self markDirty];
+}
+
+- (void)fit:(id)sender {
+    (void)sender;
+    [self fitView];
+}
+
+- (void)fitView {
+    NSRect bounds;
+    double scaleW;
+    double scaleH;
+    double s;
+
+    if (self.mtkView == nil || self.gridW < 1 || self.gridH < 1) {
+        return;
+    }
+    bounds = [self.mtkView bounds];
+    if (bounds.size.width < 1.0 || bounds.size.height < 1.0) {
+        return;
+    }
+    scaleW = bounds.size.width / (double)self.gridW;
+    scaleH = bounds.size.height / (double)self.gridH;
+    s = GOL_MIN(scaleW, scaleH);
+    s = ClampDouble(s, 0.01, (double)MAX_CELL_PX);
+    self.cellPx = (CGFloat)s;
+    self.viewOffsetX = (CGFloat)((bounds.size.width - (double)self.gridW * s) / 2.0);
+    self.viewOffsetY = (CGFloat)((bounds.size.height - (double)self.gridH * s) / 2.0);
+    [self updateZoomLabel];
+    [self markDirty];
+}
+
+- (void)updateZoomLabel {
+    int pct;
+    if (self.zoomLabel == nil) {
+        return;
+    }
+    pct = LroundInt((self.cellPx / CELL_PX) * 100.0);
+    self.zoomLabel.stringValue = [NSString stringWithFormat:@"%d%%", pct];
+}
+
+- (void)updateHintLabel {
+    NSString *left;
+    NSString *right;
+    NSString *text;
+    if (self.hintLabel == nil) {
+        return;
+    }
+    left = (self.tool == 0) ? @"add" : @"erase";
+    right = (self.tool == 0) ? @"erase" : @"add";
+    text = [NSString stringWithFormat:@"L:%@ R:%@ M:pan Scroll:zoom", left, right];
+    self.hintLabel.stringValue = text;
+}
+
+- (void)toolChanged:(id)sender {
+    (void)sender;
+    if (self.toolControl != nil && self.toolControl.selectedSegment >= 0) {
+        self.tool = (int)self.toolControl.selectedSegment;
+    } else {
+        self.tool = 0;
+    }
+    [self updateHintLabel];
+}
+
+- (NSPoint)topPointForEvent:(NSEvent *)e {
+    NSPoint pt;
+    NSPoint result;
+    CGFloat viewH;
+    pt = [self.mtkView convertPoint:[e locationInWindow] fromView:nil];
+    viewH = self.mtkView.bounds.size.height;
+    if ([self.mtkView isFlipped]) {
+        result = pt;
+    } else {
+        result = NSMakePoint(pt.x, viewH - pt.y);
+    }
+    return result;
+}
+
+- (BOOL)gridCellAtPoint:(NSPoint)pt col:(int *)outCol row:(int *)outRow {
+    double colD;
+    double rowD;
+    int col;
+    int row;
+
+    if (self.cellPx < 0.01) {
+        return NO;
+    }
+    colD = (pt.x - self.viewOffsetX) / self.cellPx;
+    rowD = (pt.y - self.viewOffsetY) / self.cellPx;
+    col = FloorInt(colD);
+    row = FloorInt(rowD);
+    if (col < 0 || col >= self.gridW || row < 0 || row >= self.gridH) {
+        return NO;
+    }
+    if (outCol != NULL) {
+        *outCol = col;
+    }
+    if (outRow != NULL) {
+        *outRow = row;
+    }
+    return YES;
+}
+
+- (void)beginPanAtEvent:(NSEvent *)e {
+    NSPoint pt;
+    pt = [self topPointForEvent:e];
+    self.panning = YES;
+    self.lastPanX = pt.x;
+    self.lastPanY = pt.y;
+}
+
+- (void)panWithEvent:(NSEvent *)e {
+    NSPoint pt;
+    if (!self.panning) {
+        return;
+    }
+    pt = [self topPointForEvent:e];
+    self.viewOffsetX += pt.x - self.lastPanX;
+    self.viewOffsetY += pt.y - self.lastPanY;
+    self.lastPanX = pt.x;
+    self.lastPanY = pt.y;
+    [self markDirty];
+}
+
+- (void)endPan {
+    self.panning = NO;
+}
+
+- (void)zoomAtEvent:(NSEvent *)e {
+    NSPoint pt;
+    double gx;
+    double gy;
+    double dy;
+    double factor;
+    double newCellPx;
+
+    if (self.mtkView == nil || self.cellPx < 0.01) {
+        return;
+    }
+    pt = [self topPointForEvent:e];
+    gx = (pt.x - self.viewOffsetX) / self.cellPx;
+    gy = (pt.y - self.viewOffsetY) / self.cellPx;
+    dy = e.scrollingDeltaY * (e.hasPreciseScrollingDeltas ? 0.02 : 0.1);
+    factor = exp2(dy);
+    factor = ClampDouble(factor, 0.5, 2.0);
+    newCellPx = (double)self.cellPx * factor;
+    newCellPx = ClampDouble(newCellPx, (double)MIN_CELL_PX, (double)MAX_CELL_PX);
+    self.cellPx = (CGFloat)newCellPx;
+    self.viewOffsetX = pt.x - (CGFloat)gx * self.cellPx;
+    self.viewOffsetY = pt.y - (CGFloat)gy * self.cellPx;
+    [self updateZoomLabel];
+    [self markDirty];
+}
+
+- (void)hoverAtEvent:(NSEvent *)e {
+    NSPoint pt;
+    pt = [self topPointForEvent:e];
+    [self updateHoverAtPoint:pt];
+}
+
+- (void)hoverExited {
+    if (self.hoverLabel != nil) {
+        self.hoverLabel.stringValue = @"--";
+    }
+}
+
+- (void)updateHoverAtPoint:(NSPoint)pt {
+    int col;
+    int row;
+    uint16_t *cells;
+    uint16_t v;
+    size_t idx;
+    NSString *text;
+
+    col = 0;
+    row = 0;
+    if (self.hoverLabel == nil) {
+        return;
+    }
+    if (![self gridCellAtPoint:pt col:&col row:&row]) {
+        self.hoverLabel.stringValue = @"--";
+        return;
+    }
+    cells = [self planePointer:self.displayPlane];
+    if (cells == nil) {
+        self.hoverLabel.stringValue = @"--";
+        return;
+    }
+    idx = (size_t)row * (size_t)self.gridW + (size_t)col;
+    v = cells[idx];
+    if (GolAlive(v)) {
+        text = [NSString stringWithFormat:@"%d,%d alive age %d", col, row, (int)GolAge(v)];
+    } else {
+        text = [NSString stringWithFormat:@"%d,%d dead", col, row];
+    }
+    self.hoverLabel.stringValue = text;
+}
+
+- (BOOL)handleKey:(NSEvent *)event {
+    NSEventModifierFlags flags;
+
+    flags = event.modifierFlags;
+    if ((flags & (NSEventModifierFlagCommand | NSEventModifierFlagControl)) != 0) {
+        return NO;
+    }
+    if ([self.window firstResponder] != self.mtkView) {
+        return NO;
+    }
+    switch (event.keyCode) {
+        case 49:
+            [self goPause:nil];
+            return YES;
+        case 15:
+            [self clear];
+            return YES;
+        case 6:
+            [self randomize];
+            return YES;
+        case 3:
+        case 29:
+            [self fitView];
+            return YES;
+        default:
+            return NO;
+    }
 }
 
 - (void)sliderChanged:(id)sender {
     int val;
+    if (sender == self.brushSlider) {
+        self.brushRadius = FloorInt(self.brushSlider.doubleValue);
+        if (self.brushLabel != nil) {
+            self.brushLabel.stringValue = [NSString stringWithFormat:@"%d", self.brushRadius];
+        }
+        return;
+    }
     if (sender == self.speedSlider) {
         val = FloorInt(self.speedSlider.doubleValue);
         if (self.speedLabel != nil) {
@@ -812,17 +1224,11 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 }
 
 - (void)paintAtEvent:(NSEvent *)e add:(BOOL)add {
-    static const int kBrush[5][2] = {
-        {0, 0}, {-1, 0}, {1, 0}, {0, -1}, {0, 1}
-    };
     NSPoint pt;
-    CGFloat viewH;
-    CGFloat yTop;
-    double colD;
-    double rowD;
     int col;
     int row;
-    int k;
+    int dx;
+    int dy;
     int cx;
     int cy;
     uint16_t *cells;
@@ -831,26 +1237,25 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
         return;
     }
     [self waitLast];
-    pt = [self.mtkView convertPoint:[e locationInWindow] fromView:nil];
-    viewH = self.mtkView.bounds.size.height;
-    yTop = [self.mtkView isFlipped] ? pt.y : (viewH - pt.y);
-    colD = pt.x / CELL_PX;
-    rowD = yTop / CELL_PX;
-    col = FloorInt(colD);
-    row = FloorInt(rowD);
-    if (col < 0 || col >= self.gridW || row < 0 || row >= self.gridH) {
+    pt = [self topPointForEvent:e];
+    if (![self gridCellAtPoint:pt col:&col row:&row]) {
         return;
     }
     cells = [self currentCells];
     if (cells == nil) {
         return;
     }
-    for (k = 0; k < 5; k++) {
-        cx = col + kBrush[k][0];
-        cy = row + kBrush[k][1];
-        gol_set_plane(cells, self.gridW, self.gridH, cx, cy, add);
+    for (dy = -self.brushRadius; dy <= self.brushRadius; dy++) {
+        for (dx = -self.brushRadius; dx <= self.brushRadius; dx++) {
+            cx = col + dx;
+            cy = row + dy;
+            if (cx >= 0 && cx < self.gridW && cy >= 0 && cy < self.gridH) {
+                gol_set_plane(cells, self.gridW, self.gridH, cx, cy, add);
+            }
+        }
     }
     [self markDirty];
+    [self updateHoverAtPoint:pt];
 }
 
 - (void)waitLast {
@@ -877,73 +1282,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 }
 
 - (void)updateGridForPixelSize:(CGSize)pixelSize {
-    CGFloat scale;
-    double newWD;
-    double newHD;
-    int newW;
-    int newH;
-    double shrink;
-    int oldW;
-    int oldH;
-    uint16_t *base;
-    uint16_t *oldPlane;
-    uint16_t *tmp;
-    uint32_t p;
-
-    if (self.gridBuf == nil || self.mtkView == nil) {
-        return;
-    }
-    if (pixelSize.width < 1.0 || pixelSize.height < 1.0) {
-        return;
-    }
-
-    scale = self.mtkView.window ? self.mtkView.window.backingScaleFactor : 1.0;
-    if (scale < 1.0) {
-        scale = 1.0;
-    }
-
-    newWD = pixelSize.width / (CELL_PX * scale);
-    newHD = pixelSize.height / (CELL_PX * scale);
-    newW = FloorInt(newWD);
-    newH = FloorInt(newHD);
-    newW = GOL_MAX(8, GOL_MIN(newW, self.maxGridW));
-    newH = GOL_MAX(8, GOL_MIN(newH, self.maxGridH));
-
-    if ((NSUInteger)newW * (NSUInteger)newH > self.planeCells) {
-        shrink = sqrt((double)self.planeCells / ((double)newW * (double)newH));
-        newW = GOL_MAX(8, FloorInt((double)newW * shrink));
-        newH = GOL_MAX(8, FloorInt((double)newH * shrink));
-    }
-
-    if (newW == self.gridW && newH == self.gridH) {
-        return;
-    }
-
-    [self waitLast];
-    [self clearCBRing];
-
-    oldW = self.gridW;
-    oldH = self.gridH;
-    base = (uint16_t *)[self.gridBuf contents];
-    oldPlane = base + (size_t)self.displayPlane * (size_t)self.planeCells;
-    tmp = (uint16_t *)calloc(self.planeCells, sizeof(uint16_t));
-    if (tmp == nil) {
-        return;
-    }
-
-    gol_resize_copy(oldPlane, oldW, oldH, tmp, newW, newH, self.planeCells);
-    self.gridW = newW;
-    self.gridH = newH;
-
-    memcpy(base, tmp, (size_t)self.planeCells * sizeof(uint16_t));
-    for (p = 1; p < (uint32_t)PLANE_COUNT; p++) {
-        memset(base + (size_t)p * (size_t)self.planeCells, 0, self.planeBytes);
-    }
-    free(tmp);
-
-    self.frameIndex = 0;
-    self.displayPlane = 0;
-    [self rebuildCellTexture];
+    (void)pixelSize;
 }
 
 - (void)rebuildCellTexture {
@@ -981,7 +1320,8 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     NSView *bar;
     CGFloat x;
     CGFloat y;
-    NSButton *resetButton;
+    NSButton *clearButton;
+    NSButton *fitButton;
     NSPopUpButton *presetsPopup;
     __weak App *weakSelf;
 
@@ -998,6 +1338,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     [self.window setContentSize:content.size];
     [self.window setBackgroundColor:[NSColor colorWithSRGBRed:0.04 green:0.05 blue:0.08 alpha:1.0]];
     [self.window setDelegate:self];
+    self.window.acceptsMouseMovedEvents = YES;
     [self.window center];
 
     screen = ScreenForWindow(self.window);
@@ -1123,19 +1464,74 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     [bar addSubview:self.goButton];
     x += 75;
 
-    resetButton = [[NSButton alloc] initWithFrame:NSMakeRect(x, y - 3, 65, 24)];
-    resetButton.title = @"Reset";
-    resetButton.bezelStyle = NSBezelStyleRounded;
-    resetButton.target = self;
-    resetButton.action = @selector(reset:);
-    [bar addSubview:resetButton];
+    clearButton = [[NSButton alloc] initWithFrame:NSMakeRect(x, y - 3, 65, 24)];
+    clearButton.title = @"Clear";
+    clearButton.bezelStyle = NSBezelStyleRounded;
+    clearButton.target = self;
+    clearButton.action = @selector(clear:);
+    [bar addSubview:clearButton];
     x += 75;
 
     self.genLabel = MakeLabelSmall(@"Gen 0", NSMakeRect(x, y, 90, 18));
     [bar addSubview:self.genLabel];
     x += 100;
 
-    [bar addSubview:MakeLabelSmall(@"L:add  R:erase", NSMakeRect(x, y, 120, 18))];
+    self.hintLabel = MakeLabelSmall(@"L:add  R:erase", NSMakeRect(x, y, 220, 18));
+    [bar addSubview:self.hintLabel];
+
+    y = 68;
+    x = 12;
+
+    [bar addSubview:MakeLabelSmall(@"Tool", NSMakeRect(x, y, 35, 18))];
+    x += 40;
+
+    self.toolControl = [[NSSegmentedControl alloc] initWithFrame:NSMakeRect(x, y - 3, 90, 24)];
+    self.toolControl.segmentCount = 2;
+    [self.toolControl setLabel:@"Add" forSegment:0];
+    [self.toolControl setLabel:@"Erase" forSegment:1];
+    self.toolControl.trackingMode = NSSegmentSwitchTrackingSelectOne;
+    self.toolControl.selectedSegment = 0;
+    self.toolControl.target = self;
+    self.toolControl.action = @selector(toolChanged:);
+    [bar addSubview:self.toolControl];
+    x += 100;
+
+    [bar addSubview:MakeLabelSmall(@"Brush", NSMakeRect(x, y, 40, 18))];
+    x += 45;
+
+    self.brushSlider = [[NSSlider alloc] initWithFrame:NSMakeRect(x, y - 3, 90, 20)];
+    self.brushSlider.minValue = 0.0;
+    self.brushSlider.maxValue = 10.0;
+    self.brushSlider.doubleValue = 1.0;
+    self.brushSlider.allowsTickMarkValuesOnly = NO;
+    self.brushSlider.numberOfTickMarks = 0;
+    self.brushSlider.continuous = YES;
+    self.brushSlider.target = self;
+    self.brushSlider.action = @selector(sliderChanged:);
+    [bar addSubview:self.brushSlider];
+    x += 100;
+
+    self.brushLabel = MakeLabelSmall(@"1", NSMakeRect(x, y, 30, 18));
+    [bar addSubview:self.brushLabel];
+    x += 40;
+
+    [bar addSubview:MakeLabelSmall(@"Zoom", NSMakeRect(x, y, 35, 18))];
+    x += 40;
+
+    self.zoomLabel = MakeLabelSmall(@"100%", NSMakeRect(x, y, 55, 18));
+    [bar addSubview:self.zoomLabel];
+    x += 65;
+
+    fitButton = [[NSButton alloc] initWithFrame:NSMakeRect(x, y - 3, 50, 24)];
+    fitButton.title = @"Fit";
+    fitButton.bezelStyle = NSBezelStyleRounded;
+    fitButton.target = self;
+    fitButton.action = @selector(fit:);
+    [bar addSubview:fitButton];
+    x += 60;
+
+    self.hoverLabel = MakeLabel(@"--", NSMakeRect(x, y, 180, 18));
+    [bar addSubview:self.hoverLabel];
 
     weakSelf = self;
     self.birthRangeView.rangeChanged = ^{
@@ -1151,8 +1547,21 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
         }
     };
 
+    self.keyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
+                                                           handler:^NSEvent *(NSEvent *event) {
+        App *strongSelf = weakSelf;
+        if (strongSelf != nil && [strongSelf handleKey:event]) {
+            return nil;
+        }
+        return event;
+    }];
+
     [self updateRuleUI];
+    [self updateZoomLabel];
+    [self updateHintLabel];
+    [self fitView];
     [self.window makeKeyAndOrderFront:nil];
+    [self.window makeFirstResponder:self.mtkView];
 }
 
 - (void)drawInMTKView:(MTKView *)view {
@@ -1212,6 +1621,8 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     CFTimeInterval frameDt;
     GOLRules r;
     Uniforms *u;
+    CGFloat boundsW;
+    CGFloat boundsH;
     double genPerSec;
     double genInterval;
     int gensToAdvance;
@@ -1276,6 +1687,25 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     u->survival = r.survival;
     u->pad2 = 0;
     u->pad3 = 0;
+    boundsW = self.mtkView.bounds.size.width;
+    boundsH = self.mtkView.bounds.size.height;
+    if (boundsW < 1.0) {
+        boundsW = 1.0;
+    }
+    if (boundsH < 1.0) {
+        boundsH = 1.0;
+    }
+    if (self.cellPx < 0.01) {
+        self.cellPx = CELL_PX;
+    }
+    u->viewScaleX = (float)(1.0 / self.cellPx);
+    u->viewScaleY = (float)(1.0 / self.cellPx);
+    u->viewOffsetX = (float)self.viewOffsetX;
+    u->viewOffsetY = (float)self.viewOffsetY;
+    u->viewWidth = (float)boundsW;
+    u->viewHeight = (float)boundsH;
+    u->displayMode = self.displayMode;
+    u->pad4 = 0;
 
     if (self.running) {
         genPerSec = self.speedSlider ? self.speedSlider.doubleValue : 30.0;
@@ -1426,6 +1856,14 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 
     if (!self.running && !self.dirty) {
         self.mtkView.paused = YES;
+    }
+}
+
+- (void)applicationWillTerminate:(NSNotification *)note {
+    (void)note;
+    if (self.keyMonitor != nil) {
+        [NSEvent removeMonitor:self.keyMonitor];
+        self.keyMonitor = nil;
     }
 }
 
