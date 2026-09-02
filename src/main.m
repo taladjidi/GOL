@@ -4,14 +4,16 @@
 #import <QuartzCore/QuartzCore.h>
 #include "gol.h"
 #include <math.h>
+#include <string.h>
+#include <stdlib.h>
 
 // Rendering / simulation architecture:
 //
-// _gridBuf is one shared MTLBuffer containing PLANE_COUNT grid planes.
-// Each cell is one uint16_t: bit 0 = alive, bits 8..15 = age.
+// gridBuf is one shared MTLBuffer containing PLANE_COUNT grid planes.
+// Each cell is one uint16_t: bit 0 = alive, bits 1..15 = age.
 //
-// The active grid is _gridW x _gridH. The buffer is allocated for the maximum
-// supported grid size, and each plane uses _planeCells as its row stride.
+// The active grid is gridW x gridH. The buffer is allocated for the maximum
+// supported grid size, and each plane uses planeCells as its row stride.
 //
 // Frame loop:
 //   MTKView calls drawInMTKView: -> tick
@@ -21,7 +23,7 @@
 //     3. present drawable and commit
 //
 // Triple buffering:
-//   _frameIndex selects planes in a ring. _cbRing tracks in-flight command
+//   frameIndex selects planes in a ring. cb0/cb1/cb2 track in-flight command
 //   buffers. If the oldest buffer for a plane is still active, tick renders
 //   the latest submitted plane but skips the simulation step for that frame.
 //
@@ -35,7 +37,10 @@ static const int VIEW_W = (int)(INITIAL_GRID_W * CELL_PX);
 static const int VIEW_H = (int)(INITIAL_GRID_H * CELL_PX);
 static const int BAR_H = 120;
 static const int RENDER_SCALE = 1;
-enum { PLANE_COUNT = 3 };
+static const int PLANE_COUNT = 3;
+
+#define GOL_MIN(A, B) ((A) < (B) ? (A) : (B))
+#define GOL_MAX(A, B) ((A) > (B) ? (A) : (B))
 
 typedef struct {
     uint32_t gridW;
@@ -56,6 +61,24 @@ static MTLSize MakeSize(int w, int h, int d) {
     return s;
 }
 
+static int FloorInt(double value) {
+    double floored = floor(value);
+    return (int)floored;
+}
+
+static int LroundInt(double value) {
+    double shifted = value + (value >= 0.0 ? 0.5 : -0.5);
+    double floored = floor(shifted);
+    return (int)floored;
+}
+
+static NSScreen *ScreenForWindow(NSWindow *window) {
+    if (window != nil && window.screen != nil) {
+        return window.screen;
+    }
+    return [NSScreen mainScreen];
+}
+
 static NSTextField *MakeLabel(NSString *s, NSRect f) {
     NSTextField *l = [NSTextField labelWithString:s];
     l.frame = f;
@@ -72,7 +95,258 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     return l;
 }
 
+@class App;
+@class GOLView;
+
+@interface GOLRangeSlider : NSView
+@property (nonatomic, assign) int minValue;
+@property (nonatomic, assign) int maxValue;
+@property (nonatomic, assign) int defaultMin;
+@property (nonatomic, assign) int defaultMax;
+@property (nonatomic, assign) int draggingHandle;
+@property (nonatomic, copy) void (^rangeChanged)(void);
+- (instancetype)initWithFrame:(NSRect)frame
+                     minValue:(int)minValue
+                          max:(int)maxValue
+                   defaultMin:(int)defaultMin
+                   defaultMax:(int)defaultMax;
+- (void)setRange:(int)minValue max:(int)maxValue;
+@end
+
+@implementation GOLRangeSlider
+
+@synthesize minValue = _minValue;
+@synthesize maxValue = _maxValue;
+@synthesize defaultMin = _defaultMin;
+@synthesize defaultMax = _defaultMax;
+@synthesize draggingHandle = _draggingHandle;
+@synthesize rangeChanged = _rangeChanged;
+
+- (instancetype)initWithFrame:(NSRect)frame
+                     minValue:(int)minValue
+                          max:(int)maxValue
+                   defaultMin:(int)defaultMin
+                   defaultMax:(int)defaultMax {
+    if ((self = [super initWithFrame:frame])) {
+        self.minValue = minValue;
+        self.maxValue = maxValue;
+        self.defaultMin = defaultMin;
+        self.defaultMax = defaultMax;
+        self.draggingHandle = -1;
+        self.rangeChanged = nil;
+        self.wantsLayer = YES;
+        self.layer.backgroundColor = [NSColor clearColor].CGColor;
+        self.toolTip = @"Drag handles to set rule range";
+    }
+    return self;
+}
+
+- (void)setRange:(int)minValue max:(int)maxValue {
+    int t;
+    self.minValue = GOL_MIN(GOL_MAX(minValue, 0), 8);
+    self.maxValue = GOL_MIN(GOL_MAX(maxValue, 0), 8);
+    if (self.minValue > self.maxValue) {
+        t = self.minValue;
+        self.minValue = self.maxValue;
+        self.maxValue = t;
+    }
+    [self setNeedsDisplay:YES];
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+    NSRect bounds;
+    CGFloat trackY;
+    CGFloat trackH;
+    CGFloat trackX;
+    CGFloat trackW;
+    NSBezierPath *trackPath;
+    CGFloat defX1;
+    CGFloat defX2;
+    NSBezierPath *defPath;
+    CGFloat actX1;
+    CGFloat actX2;
+    NSBezierPath *actPath;
+    int i;
+    CGFloat lx;
+    NSString *label;
+    NSDictionary *attrs;
+    NSSize textSize;
+    NSPoint textPoint;
+    int handleIndex;
+    int val;
+    CGFloat hx;
+    CGFloat handleR;
+    NSBezierPath *handlePath;
+
+    (void)dirtyRect;
+    [super drawRect:dirtyRect];
+
+    bounds = [self bounds];
+    trackY = bounds.size.height * 0.5;
+    trackH = 6.0;
+    trackX = 10.0;
+    trackW = bounds.size.width - 20.0;
+
+    trackPath = [NSBezierPath bezierPathWithRoundedRect:NSMakeRect(trackX, trackY - trackH * 0.5, trackW, trackH) xRadius:3.0 yRadius:3.0];
+    [[NSColor colorWithSRGBRed:0.15 green:0.18 blue:0.22 alpha:1.0] setFill];
+    [trackPath fill];
+
+    if (self.defaultMin <= self.defaultMax) {
+        defX1 = trackX + (self.defaultMin / 8.0) * trackW;
+        defX2 = trackX + (self.defaultMax / 8.0) * trackW;
+        defPath = [NSBezierPath bezierPathWithRoundedRect:NSMakeRect(defX1, trackY - trackH * 0.5 - 2, defX2 - defX1, trackH + 4) xRadius:4.0 yRadius:4.0];
+        [[NSColor colorWithSRGBRed:0.3 green:0.6 blue:0.35 alpha:0.25] setFill];
+        [defPath fill];
+    }
+
+    actX1 = trackX + (self.minValue / 8.0) * trackW;
+    actX2 = trackX + (self.maxValue / 8.0) * trackW;
+    actPath = [NSBezierPath bezierPathWithRoundedRect:NSMakeRect(actX1, trackY - trackH * 0.5, actX2 - actX1, trackH) xRadius:3.0 yRadius:3.0];
+    [[NSColor colorWithSRGBRed:0.25 green:0.7 blue:0.35 alpha:0.6] setFill];
+    [actPath fill];
+
+    for (i = 0; i <= 8; i++) {
+        lx = trackX + (i / 8.0) * trackW;
+        label = [NSString stringWithFormat:@"%d", i];
+        attrs = @{ NSFontAttributeName: [NSFont systemFontOfSize:9],
+                   NSForegroundColorAttributeName: (i >= self.minValue && i <= self.maxValue) ? [NSColor whiteColor] : [NSColor colorWithSRGBRed:0.5 green:0.55 blue:0.6 alpha:1.0] };
+        textSize = [label sizeWithAttributes:attrs];
+        textPoint = NSMakePoint(lx - textSize.width * 0.5, trackY + 8);
+        [label drawAtPoint:textPoint withAttributes:attrs];
+    }
+
+    handleR = 8.0;
+    for (handleIndex = 0; handleIndex < 2; handleIndex++) {
+        val = (handleIndex == 0) ? self.minValue : self.maxValue;
+        hx = trackX + (val / 8.0) * trackW;
+        handlePath = [NSBezierPath bezierPathWithOvalInRect:NSMakeRect(hx - handleR, trackY - handleR, handleR * 2, handleR * 2)];
+        [[NSColor colorWithSRGBRed:0.9 green:0.92 blue:0.95 alpha:1.0] setFill];
+        [handlePath fill];
+        [[NSColor colorWithSRGBRed:0.4 green:0.45 blue:0.5 alpha:1.0] setStroke];
+        handlePath.lineWidth = 1.5;
+        [handlePath stroke];
+    }
+}
+
+- (BOOL)acceptsFirstResponder {
+    return YES;
+}
+
+- (BOOL)becomeFirstResponder {
+    return YES;
+}
+
+- (void)mouseDown:(NSEvent *)e {
+    NSPoint pt;
+    CGFloat trackX;
+    CGFloat trackW;
+    CGFloat minHx;
+    CGFloat maxHx;
+    CGFloat distMin;
+    CGFloat distMax;
+
+    [self becomeFirstResponder];
+    pt = [self convertPoint:[e locationInWindow] fromView:nil];
+    trackX = 10.0;
+    trackW = [self bounds].size.width - 20.0;
+
+    minHx = trackX + (self.minValue / 8.0) * trackW;
+    maxHx = trackX + (self.maxValue / 8.0) * trackW;
+
+    distMin = fabs(pt.x - minHx);
+    distMax = fabs(pt.x - maxHx);
+
+    if (distMin < distMax && distMin < 15.0) {
+        self.draggingHandle = 0;
+    } else if (distMax < 15.0) {
+        self.draggingHandle = 1;
+    }
+}
+
+- (void)mouseDragged:(NSEvent *)e {
+    NSPoint pt;
+    CGFloat trackX;
+    CGFloat trackW;
+    double valD;
+    int val;
+
+    if (self.draggingHandle < 0) {
+        return;
+    }
+
+    pt = [self convertPoint:[e locationInWindow] fromView:nil];
+    trackX = 10.0;
+    trackW = [self bounds].size.width - 20.0;
+
+    valD = (pt.x - trackX) / trackW * 8.0;
+    val = LroundInt(valD);
+    val = GOL_MIN(GOL_MAX(val, 0), 8);
+
+    if (self.draggingHandle == 0) {
+        self.minValue = GOL_MIN(val, self.maxValue);
+    } else {
+        self.maxValue = GOL_MAX(val, self.minValue);
+    }
+
+    [self setNeedsDisplay:YES];
+
+    if (self.rangeChanged != nil) {
+        self.rangeChanged();
+    }
+}
+
+- (void)mouseUp:(NSEvent *)e {
+    (void)e;
+    self.draggingHandle = -1;
+}
+
+@end
+
 @interface App : NSObject <NSApplicationDelegate, NSWindowDelegate, MTKViewDelegate>
+@property (nonatomic, strong) NSWindow *window;
+@property (nonatomic, strong) GOLView *mtkView;
+@property (nonatomic, strong) id<MTLDevice> device;
+@property (nonatomic, strong) id<MTLCommandQueue> queue;
+@property (nonatomic, strong) id<MTLLibrary> library;
+@property (nonatomic, strong) id<MTLRenderPipelineState> renderPipeline;
+@property (nonatomic, strong) id<MTLRenderPipelineState> scalePipeline;
+@property (nonatomic, strong) id<MTLComputePipelineState> stepPipeline;
+@property (nonatomic, strong) id<MTLTexture> cellTex;
+@property (nonatomic, strong) id<MTLBuffer> gridBuf;
+@property (nonatomic, strong) id<MTLBuffer> uniformsBuf;
+@property (nonatomic, strong) id<MTLCommandBuffer> cb0;
+@property (nonatomic, strong) id<MTLCommandBuffer> cb1;
+@property (nonatomic, strong) id<MTLCommandBuffer> cb2;
+@property (nonatomic, strong) id<MTLCommandBuffer> lastCB;
+@property (nonatomic, assign) uint64_t frameIndex;
+@property (nonatomic, assign) uint32_t displayPlane;
+@property (nonatomic, assign) int gridW;
+@property (nonatomic, assign) int gridH;
+@property (nonatomic, assign) int maxGridW;
+@property (nonatomic, assign) int maxGridH;
+@property (nonatomic, assign) NSUInteger planeCells;
+@property (nonatomic, assign) NSUInteger planeBytes;
+@property (nonatomic, assign) BOOL running;
+@property (nonatomic, assign) BOOL dirty;
+@property (nonatomic, assign) uint32_t gen;
+@property (nonatomic, assign) CFTimeInterval fpsWindowStart;
+@property (nonatomic, assign) CFTimeInterval simLastTime;
+@property (nonatomic, assign) uint32_t fpsFrames;
+@property (nonatomic, assign) GOLRules rules;
+@property (nonatomic, strong) NSSlider *densitySlider;
+@property (nonatomic, strong) NSTextField *densityPct;
+@property (nonatomic, strong) NSButton *goButton;
+@property (nonatomic, strong) NSTextField *genLabel;
+@property (nonatomic, strong) NSTextField *fpsLabel;
+@property (nonatomic, strong) NSTextField *ruleLabel;
+@property (nonatomic, strong) NSTextField *popLabel;
+@property (nonatomic, strong) NSTextField *maxAgeLabel;
+@property (nonatomic, strong) NSSlider *speedSlider;
+@property (nonatomic, strong) NSTextField *speedLabel;
+@property (nonatomic, strong) GOLRangeSlider *birthRangeView;
+@property (nonatomic, strong) GOLRangeSlider *survRangeView;
+@property (nonatomic, assign) CFTimeInterval genAccum;
+
 - (BOOL)setupMetal;
 - (void)setupUI;
 - (void)randomize;
@@ -89,9 +363,13 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 - (void)tick;
 - (void)drawInMTKView:(MTKView *)view;
 - (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size;
-- (void)ruleToggled:(id)sender;
+- (void)ruleSliderChanged:(id)sender;
 - (void)rulePresetClicked:(id)sender;
 - (void)applyPreset:(const char *)name;
+- (void)updateRuleUI;
+- (id<MTLCommandBuffer>)cbAt:(uint32_t)plane;
+- (void)setCB:(id<MTLCommandBuffer>)cb at:(uint32_t)plane;
+- (void)clearCBRing;
 @end
 
 @interface GOLView : MTKView
@@ -99,6 +377,8 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 @end
 
 @implementation GOLView
+
+@synthesize owner = _owner;
 
 - (void)mouseDown:(NSEvent *)e {
     [self.owner paintAtEvent:e add:YES];
@@ -118,62 +398,68 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 
 @end
 
-@implementation App {
-    NSWindow *_window;
-    GOLView *_mtkView;
-    id<MTLDevice> _device;
-    id<MTLCommandQueue> _queue;
-    id<MTLLibrary> _library;
-    id<MTLRenderPipelineState> _renderPipeline;
-    id<MTLRenderPipelineState> _scalePipeline;
-    id<MTLComputePipelineState> _stepPipeline;
-    id<MTLTexture> _cellTex;
-    id<MTLBuffer> _gridBuf;
-    id<MTLBuffer> _uniformsBuf;
-    id<MTLCommandBuffer> _cbRing[PLANE_COUNT];
-    id<MTLCommandBuffer> _lastCB;
-    uint64_t _frameIndex;
-    uint32_t _displayPlane;
-    int _gridW;
-    int _gridH;
-    int _maxGridW;
-    int _maxGridH;
-    NSUInteger _planeCells;
-    NSUInteger _planeBytes;
-    BOOL _running;
-    BOOL _dirty;
-    uint32_t _gen;
-    CFTimeInterval _fpsLast;
-    uint32_t _fpsFrames;
-    GOLRules _rules;
-    NSSlider *_densitySlider;
-    NSTextField *_densityPct;
-    NSButton *_goButton;
-    NSTextField *_genLabel;
-    NSTextField *_fpsLabel;
-    NSTextField *_ruleLabel;
-    NSTextField *_popLabel;
-    NSTextField *_maxAgeLabel;
-    NSSlider *_speedSlider;
-    NSTextField *_speedLabel;
-    NSPopUpButton *_presetsPopup;
-    NSButton *_ruleToggles[9]; // birth toggles
-    NSButton *_ruleTSurv[9];  // survival toggles
-    CFTimeInterval _genAccum;
-}
+@implementation App
+
+@synthesize window = _window;
+@synthesize mtkView = _mtkView;
+@synthesize device = _device;
+@synthesize queue = _queue;
+@synthesize library = _library;
+@synthesize renderPipeline = _renderPipeline;
+@synthesize scalePipeline = _scalePipeline;
+@synthesize stepPipeline = _stepPipeline;
+@synthesize cellTex = _cellTex;
+@synthesize gridBuf = _gridBuf;
+@synthesize uniformsBuf = _uniformsBuf;
+@synthesize cb0 = _cb0;
+@synthesize cb1 = _cb1;
+@synthesize cb2 = _cb2;
+@synthesize lastCB = _lastCB;
+@synthesize frameIndex = _frameIndex;
+@synthesize displayPlane = _displayPlane;
+@synthesize gridW = _gridW;
+@synthesize gridH = _gridH;
+@synthesize maxGridW = _maxGridW;
+@synthesize maxGridH = _maxGridH;
+@synthesize planeCells = _planeCells;
+@synthesize planeBytes = _planeBytes;
+@synthesize running = _running;
+@synthesize dirty = _dirty;
+@synthesize gen = _gen;
+@synthesize fpsWindowStart = _fpsWindowStart;
+@synthesize simLastTime = _simLastTime;
+@synthesize fpsFrames = _fpsFrames;
+@synthesize rules = _rules;
+@synthesize densitySlider = _densitySlider;
+@synthesize densityPct = _densityPct;
+@synthesize goButton = _goButton;
+@synthesize genLabel = _genLabel;
+@synthesize fpsLabel = _fpsLabel;
+@synthesize ruleLabel = _ruleLabel;
+@synthesize popLabel = _popLabel;
+@synthesize maxAgeLabel = _maxAgeLabel;
+@synthesize speedSlider = _speedSlider;
+@synthesize speedLabel = _speedLabel;
+@synthesize birthRangeView = _birthRangeView;
+@synthesize survRangeView = _survRangeView;
+@synthesize genAccum = _genAccum;
 
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
+    CFTimeInterval now;
     (void)note;
-    _frameIndex = 0;
-    _displayPlane = 0;
-    _gridW = INITIAL_GRID_W;
-    _gridH = INITIAL_GRID_H;
-    _gen = 0;
-    _dirty = NO;
-    _fpsLast = 0;
-    _fpsFrames = 0;
-    _genAccum = 0;
-    _rules = gol_default_rules();
+    now = CFAbsoluteTimeGetCurrent();
+    self.frameIndex = 0;
+    self.displayPlane = 0;
+    self.gridW = INITIAL_GRID_W;
+    self.gridH = INITIAL_GRID_H;
+    self.gen = 0;
+    self.dirty = NO;
+    self.running = NO;
+    self.fpsWindowStart = now;
+    self.simLastTime = now;
+    self.fpsFrames = 0;
+    self.genAccum = 0;
+    self.rules = gol_default_rules();
     if (![self setupMetal]) {
         NSLog(@"Metal setup failed");
         [NSApp terminate:nil];
@@ -184,150 +470,215 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 }
 
 - (BOOL)setupMetal {
-    _device = MTLCreateSystemDefaultDevice();
-    if (!_device) return NO;
-    _queue = [_device newCommandQueue];
-    if (!_queue) return NO;
+    NSString *exeDir;
+    NSString *libPath;
+    NSURL *libURL;
+    NSError *err;
+    NSScreen *screen;
+    CGFloat screenW;
+    CGFloat screenH;
+    NSUInteger need;
+    MTLRenderPipelineDescriptor *rp;
+    MTLRenderPipelineDescriptor *sp;
+    id<MTLFunction> stepFunc;
 
-    NSString *exeDir = [[NSBundle mainBundle] executablePath];
+    self.device = MTLCreateSystemDefaultDevice();
+    if (self.device == nil) {
+        return NO;
+    }
+    self.queue = [self.device newCommandQueue];
+    if (self.queue == nil) {
+        return NO;
+    }
+
+    exeDir = [[NSBundle mainBundle] executablePath];
     exeDir = [exeDir stringByDeletingLastPathComponent];
-    NSString *libPath = [exeDir stringByAppendingPathComponent:@"shaders.metallib"];
-    NSError *err = nil;
-    _library = [_device newLibraryWithURL:[NSURL fileURLWithPath:libPath] error:&err];
-    if (!_library) {
+    libPath = [exeDir stringByAppendingPathComponent:@"shaders.metallib"];
+    libURL = [NSURL fileURLWithPath:libPath];
+    err = nil;
+    self.library = [self.device newLibraryWithURL:libURL error:&err];
+    if (self.library == nil) {
         NSLog(@"failed to load metallib: %@", err);
         return NO;
     }
 
-    _mtkView = [[GOLView alloc] initWithFrame:NSMakeRect(0, BAR_H, VIEW_W, VIEW_H)
-                                          device:_device];
-    _mtkView.wantsLayer = YES;
-    _mtkView.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
-    _mtkView.framebufferOnly = YES;
-    _mtkView.autoResizeDrawable = YES;
-    _mtkView.preferredFramesPerSecond = 120;
-    _mtkView.paused = NO;
-    _mtkView.owner = self;
+    self.mtkView = [[GOLView alloc] initWithFrame:NSMakeRect(0, BAR_H, VIEW_W, VIEW_H)
+                                           device:self.device];
+    self.mtkView.wantsLayer = YES;
+    self.mtkView.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
+    self.mtkView.framebufferOnly = YES;
+    self.mtkView.autoResizeDrawable = YES;
+    self.mtkView.preferredFramesPerSecond = 120;
+    self.mtkView.paused = NO;
+    self.mtkView.owner = self;
 
-    NSScreen *screen = _mtkView.window.screen ?: [NSScreen mainScreen];
-    CGFloat screenW = screen.frame.size.width;
-    CGFloat screenH = screen.frame.size.height;
-    _maxGridW = (int)floor(screenW / CELL_PX) + 16;
-    _maxGridH = (int)floor(MAX(0.0, screenH - (CGFloat)BAR_H) / CELL_PX) + 16;
-    _maxGridW = MAX(_maxGridW, INITIAL_GRID_W);
-    _maxGridH = MAX(_maxGridH, INITIAL_GRID_H);
-    NSUInteger need = (NSUInteger)_maxGridW * (NSUInteger)_maxGridH;
-    _planeCells = ((need + 7) / 8) * 8;
-    _planeBytes = _planeCells * sizeof(uint16_t);
+    screen = ScreenForWindow(self.mtkView.window);
+    screenW = screen.frame.size.width;
+    screenH = screen.frame.size.height;
+    self.maxGridW = FloorInt(screenW / CELL_PX) + 16;
+    self.maxGridH = FloorInt(GOL_MAX(0.0, screenH - (CGFloat)BAR_H) / CELL_PX) + 16;
+    self.maxGridW = GOL_MAX(self.maxGridW, INITIAL_GRID_W);
+    self.maxGridH = GOL_MAX(self.maxGridH, INITIAL_GRID_H);
+    need = (NSUInteger)self.maxGridW * (NSUInteger)self.maxGridH;
+    self.planeCells = ((need + 7) / 8) * 8;
+    self.planeBytes = self.planeCells * sizeof(uint16_t);
 
-    _gridBuf = [_device newBufferWithLength:(NSUInteger)PLANE_COUNT * _planeBytes
-                                    options:MTLResourceStorageModeShared];
-    if (!_gridBuf) return NO;
-    memset([_gridBuf contents], 0, PLANE_COUNT * _planeBytes);
+    self.gridBuf = [self.device newBufferWithLength:(NSUInteger)PLANE_COUNT * self.planeBytes
+                                            options:MTLResourceStorageModeShared];
+    if (self.gridBuf == nil) {
+        return NO;
+    }
+    memset([self.gridBuf contents], 0, (size_t)PLANE_COUNT * self.planeBytes);
 
-    _uniformsBuf = [_device newBufferWithLength:sizeof(Uniforms) options:MTLResourceStorageModeShared];
-    if (!_uniformsBuf) return NO;
-
-    for (int i = 0; i < PLANE_COUNT; i++) {
-        _cbRing[i] = nil;
+    self.uniformsBuf = [self.device newBufferWithLength:sizeof(Uniforms) options:MTLResourceStorageModeShared];
+    if (self.uniformsBuf == nil) {
+        return NO;
     }
 
-    MTLRenderPipelineDescriptor *rp = [MTLRenderPipelineDescriptor new];
-    rp.vertexFunction = [_library newFunctionWithName:@"vs_main"];
-    rp.fragmentFunction = [_library newFunctionWithName:@"fs_main"];
-    rp.colorAttachments[0].pixelFormat = _mtkView.colorPixelFormat;
-    _renderPipeline = [_device newRenderPipelineStateWithDescriptor:rp error:&err];
-    if (!_renderPipeline) {
+    self.cb0 = nil;
+    self.cb1 = nil;
+    self.cb2 = nil;
+    self.lastCB = nil;
+
+    rp = [MTLRenderPipelineDescriptor new];
+    rp.vertexFunction = [self.library newFunctionWithName:@"vs_main"];
+    rp.fragmentFunction = [self.library newFunctionWithName:@"fs_main"];
+    rp.colorAttachments[0].pixelFormat = self.mtkView.colorPixelFormat;
+    err = nil;
+    self.renderPipeline = [self.device newRenderPipelineStateWithDescriptor:rp error:&err];
+    if (self.renderPipeline == nil) {
         NSLog(@"failed to create render pipeline: %@", err);
         return NO;
     }
 
-    MTLRenderPipelineDescriptor *sp = [MTLRenderPipelineDescriptor new];
-    sp.vertexFunction = [_library newFunctionWithName:@"vs_main"];
-    sp.fragmentFunction = [_library newFunctionWithName:@"fs_scale"];
-    sp.colorAttachments[0].pixelFormat = _mtkView.colorPixelFormat;
-    _scalePipeline = [_device newRenderPipelineStateWithDescriptor:sp error:&err];
-    if (!_scalePipeline) {
+    sp = [MTLRenderPipelineDescriptor new];
+    sp.vertexFunction = [self.library newFunctionWithName:@"vs_main"];
+    sp.fragmentFunction = [self.library newFunctionWithName:@"fs_scale"];
+    sp.colorAttachments[0].pixelFormat = self.mtkView.colorPixelFormat;
+    err = nil;
+    self.scalePipeline = [self.device newRenderPipelineStateWithDescriptor:sp error:&err];
+    if (self.scalePipeline == nil) {
         NSLog(@"failed to create scale pipeline: %@", err);
         return NO;
     }
 
-    id<MTLFunction> stepFunc = [_library newFunctionWithName:@"gol_step"];
-    _stepPipeline = [_device newComputePipelineStateWithFunction:stepFunc error:&err];
-    if (!_stepPipeline) {
+    stepFunc = [self.library newFunctionWithName:@"gol_step"];
+    err = nil;
+    self.stepPipeline = [self.device newComputePipelineStateWithFunction:stepFunc error:&err];
+    if (self.stepPipeline == nil) {
         NSLog(@"compute pipeline unavailable; using CPU fallback");
-        _stepPipeline = nil;
+        self.stepPipeline = nil;
     }
 
     [self rebuildCellTexture];
-    if (!_cellTex) return NO;
+    if (self.cellTex == nil) {
+        return NO;
+    }
 
-    _mtkView.delegate = self;
+    self.mtkView.delegate = self;
     return YES;
 }
 
-- (void)setupUniformsGPU {
-    if (!_uniformsBuf) return;
-    Uniforms *u = (Uniforms *)[_uniformsBuf contents];
-    u->birth = (uint8_t)_rules.birth;
-    u->survival = (uint8_t)_rules.survival;
-}
-
 - (void)updateRuleUI {
-    uint8_t b = _rules.birth;
-    uint8_t s = _rules.survival;
-    for (int i = 0; i < 9; i++) {
-        BOOL onB = (b >> i) & 1u;
-        BOOL onS = (s >> i) & 1u;
-        if (_ruleToggles[i]) {
-            _ruleToggles[i].state = onB ? NSControlStateValueOn : NSControlStateValueOff;
-        }
-        if (_ruleTSurv[i]) {
-            _ruleTSurv[i].state = onS ? NSControlStateValueOn : NSControlStateValueOff;
+    GOLRules r;
+    uint8_t b;
+    uint8_t s;
+    int bMin;
+    int bMax;
+    int sMin;
+    int sMax;
+    int i;
+    GOLRangeSlider *bv;
+    GOLRangeSlider *sv;
+    NSMutableString *label;
+
+    r = self.rules;
+    b = r.birth;
+    s = r.survival;
+
+    bMin = 8;
+    bMax = 0;
+    for (i = 0; i < 9; i++) {
+        if ((b >> i) & 1u) {
+            bMin = GOL_MIN(bMin, i);
+            bMax = GOL_MAX(bMax, i);
         }
     }
-    
-    // Build B/S label
-    NSMutableString *label = [NSMutableString string];
+    if (bMin > bMax) {
+        bMin = 3;
+        bMax = 3;
+    }
+
+    sMin = 8;
+    sMax = 0;
+    for (i = 0; i < 9; i++) {
+        if ((s >> i) & 1u) {
+            sMin = GOL_MIN(sMin, i);
+            sMax = GOL_MAX(sMax, i);
+        }
+    }
+    if (sMin > sMax) {
+        sMin = 2;
+        sMax = 3;
+    }
+
+    bv = self.birthRangeView;
+    sv = self.survRangeView;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (bv != nil) {
+            [bv setRange:bMin max:bMax];
+        }
+        if (sv != nil) {
+            [sv setRange:sMin max:sMax];
+        }
+    });
+
+    label = [NSMutableString string];
     [label appendString:@"B"];
-    for (int i = 0; i < 9; i++) {
-        if ((b >> i) & 1u) [label appendFormat:@"%d", i];
+    for (i = 0; i < 9; i++) {
+        if ((b >> i) & 1u) {
+            [label appendFormat:@"%d", i];
+        }
     }
     [label appendString:@"/S"];
-    for (int i = 0; i < 9; i++) {
-        if ((s >> i) & 1u) [label appendFormat:@"%d", i];
+    for (i = 0; i < 9; i++) {
+        if ((s >> i) & 1u) {
+            [label appendFormat:@"%d", i];
+        }
     }
-    if (_ruleLabel) {
-        _ruleLabel.stringValue = label;
+    if (self.ruleLabel != nil) {
+        self.ruleLabel.stringValue = label;
     }
-    
-    [self setupUniformsGPU];
 }
 
 - (void)applyPreset:(const char *)name {
+    uint16_t *cells;
+    uint16_t *base;
+    uint32_t p;
+
     [self waitLast];
-    for (int i = 0; i < PLANE_COUNT; i++) {
-        _cbRing[i] = nil;
+    [self clearCBRing];
+    self.frameIndex = 0;
+    self.displayPlane = 0;
+    self.gen = 0;
+    cells = [self currentCells];
+    if (cells == nil) {
+        return;
     }
-    _frameIndex = 0;
-    _displayPlane = 0;
-    _gen = 0;
-    uint16_t *cells = [self currentCells];
-    if (!cells) return;
-    gol_apply_preset(cells, _gridW, _gridH, name);
-    uint16_t *base = (uint16_t *)[_gridBuf contents];
-    for (uint32_t p = 1; p < (uint32_t)PLANE_COUNT; p++) {
-        memset(base + (size_t)p * (size_t)_planeCells, 0, _planeBytes);
+    gol_apply_preset(cells, self.gridW, self.gridH, name);
+    base = (uint16_t *)[self.gridBuf contents];
+    for (p = 1; p < (uint32_t)PLANE_COUNT; p++) {
+        memset(base + (size_t)p * (size_t)self.planeCells, 0, self.planeBytes);
     }
-    if (_genLabel) {
-        _genLabel.stringValue = @"Gen 0";
+    if (self.genLabel != nil) {
+        self.genLabel.stringValue = @"Gen 0";
     }
     [self markDirty];
 }
 
 - (void)rulePresetClicked:(id)sender {
     NSButton *btn = (NSButton *)sender;
-    NSString *preset = btn.title;
+    NSString *preset = [btn title];
     if ([preset isEqualToString:@"Glider"]) {
         [self applyPreset:"glider"];
     } else if ([preset isEqualToString:@"Blinker"]) {
@@ -349,58 +700,97 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     }
 }
 
-- (void)ruleToggled:(id)sender {
-    NSButton *btn = (NSButton *)sender;
-    NSInteger tag = btn.tag;
-    
-    // Tags 0-8 = birth, 10-18 = survival (skip 9)
-    if (tag >= 0 && tag <= 8) {
-        _rules.birth = (uint8_t)((_rules.birth & ~(1u << tag)) | ((btn.state == NSControlStateValueOn) ? (1u << tag) : 0));
-    } else if (tag >= 10 && tag <= 18) {
-        int n = tag - 10;
-        _rules.survival = (uint8_t)((_rules.survival & ~(1u << n)) | ((btn.state == NSControlStateValueOn) ? (1u << n) : 0));
+- (void)ruleSliderChanged:(id)sender {
+    GOLRules r;
+    int bMin;
+    int bMax;
+    int sMin;
+    int sMax;
+    int i;
+    int t;
+
+    (void)sender;
+
+    bMin = self.birthRangeView ? [self.birthRangeView minValue] : 3;
+    bMax = self.birthRangeView ? [self.birthRangeView maxValue] : 3;
+    sMin = self.survRangeView ? [self.survRangeView minValue] : 2;
+    sMax = self.survRangeView ? [self.survRangeView maxValue] : 3;
+
+    if (bMin > bMax) {
+        t = bMin;
+        bMin = bMax;
+        bMax = t;
     }
-    
+    if (sMin > sMax) {
+        t = sMin;
+        sMin = sMax;
+        sMax = t;
+    }
+
+    r = self.rules;
+    r.birth = 0;
+    for (i = bMin; i <= bMax; i++) {
+        r.birth = (uint8_t)(r.birth | (1u << i));
+    }
+    r.survival = 0;
+    for (i = sMin; i <= sMax; i++) {
+        r.survival = (uint8_t)(r.survival | (1u << i));
+    }
+    self.rules = r;
+
     [self updateRuleUI];
-    [self randomize];
 }
 
 - (void)randomize {
-    double d = _densitySlider ? _densitySlider.doubleValue : 0.2;
-    if (d < 0.0) d = 0.0;
-    if (d > 1.0) d = 1.0;
+    double density;
+    uint16_t *cells;
+    uint16_t *base;
+    uint32_t p;
+    int pct;
+
+    density = self.densitySlider ? self.densitySlider.doubleValue : 0.2;
+    if (density < 0.0) {
+        density = 0.0;
+    }
+    if (density > 1.0) {
+        density = 1.0;
+    }
     [self waitLast];
-    for (int i = 0; i < PLANE_COUNT; i++) {
-        _cbRing[i] = nil;
+    [self clearCBRing];
+    self.frameIndex = 0;
+    self.displayPlane = 0;
+    self.gen = 0;
+    self.genAccum = 0;
+    cells = [self currentCells];
+    if (cells == nil) {
+        return;
     }
-    _frameIndex = 0;
-    _displayPlane = 0;
-    _gen = 0;
-    _genAccum = 0;
-    uint16_t *cells = [self currentCells];
-    if (!cells) return;
-    gol_randomize(cells, _planeCells, _gridW, _gridH, d);
-    uint16_t *base = (uint16_t *)[_gridBuf contents];
-    for (uint32_t p = 1; p < (uint32_t)PLANE_COUNT; p++) {
-        memset(base + (size_t)p * (size_t)_planeCells, 0, _planeBytes);
+    gol_randomize(cells, self.planeCells, self.gridW, self.gridH, density);
+    base = (uint16_t *)[self.gridBuf contents];
+    for (p = 1; p < (uint32_t)PLANE_COUNT; p++) {
+        memset(base + (size_t)p * (size_t)self.planeCells, 0, self.planeBytes);
     }
-    if (_densityPct) {
-        _densityPct.stringValue = [NSString stringWithFormat:@"%d%%", (int)lround(d * 100.0)];
+    pct = LroundInt(density * 100.0);
+    if (self.densityPct != nil) {
+        self.densityPct.stringValue = [NSString stringWithFormat:@"%d%%", pct];
     }
-    if (_genLabel) {
-        _genLabel.stringValue = @"Gen 0";
+    if (self.genLabel != nil) {
+        self.genLabel.stringValue = @"Gen 0";
     }
     [self markDirty];
 }
 
 - (void)goPause:(id)sender {
     (void)sender;
-    _running = !_running;
-    _goButton.title = _running ? @"Pause" : @"Go";
-    if (_running) {
-        _mtkView.paused = NO;
-    } else if (!_dirty) {
-        _mtkView.paused = YES;
+    if (self.goButton == nil || self.mtkView == nil) {
+        return;
+    }
+    self.running = !self.running;
+    self.goButton.title = self.running ? @"Pause" : @"Go";
+    if (self.running) {
+        self.mtkView.paused = NO;
+    } else if (!self.dirty) {
+        self.mtkView.paused = YES;
     }
 }
 
@@ -410,10 +800,11 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 }
 
 - (void)sliderChanged:(id)sender {
-    if (sender == _speedSlider) {
-        if (_speedLabel) {
-            int val = (int)_speedSlider.doubleValue;
-            _speedLabel.stringValue = [NSString stringWithFormat:@"%d gen/s", val];
+    int val;
+    if (sender == self.speedSlider) {
+        val = FloorInt(self.speedSlider.doubleValue);
+        if (self.speedLabel != nil) {
+            self.speedLabel.stringValue = [NSString stringWithFormat:@"%d gen/s", val];
         }
         return;
     }
@@ -421,309 +812,348 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 }
 
 - (void)paintAtEvent:(NSEvent *)e add:(BOOL)add {
-    if (!_mtkView) return;
-    [self waitLast];
-    NSPoint pt = [_mtkView convertPoint:[e locationInWindow] fromView:nil];
-    CGFloat viewH = _mtkView.bounds.size.height;
-    double yTop = [_mtkView isFlipped] ? pt.y : (viewH - pt.y);
-    int col = (int)floor(pt.x / CELL_PX);
-    int row = (int)floor(yTop / CELL_PX);
-    if (col < 0 || col >= _gridW || row < 0 || row >= _gridH) return;
-    uint16_t *cells = [self currentCells];
-    if (!cells) return;
     static const int kBrush[5][2] = {
         {0, 0}, {-1, 0}, {1, 0}, {0, -1}, {0, 1}
     };
-    for (int k = 0; k < 5; k++) {
-        int cx = col + kBrush[k][0];
-        int cy = row + kBrush[k][1];
-        gol_set_plane(cells, _gridW, _gridH, cx, cy, add);
+    NSPoint pt;
+    CGFloat viewH;
+    CGFloat yTop;
+    double colD;
+    double rowD;
+    int col;
+    int row;
+    int k;
+    int cx;
+    int cy;
+    uint16_t *cells;
+
+    if (self.mtkView == nil) {
+        return;
+    }
+    [self waitLast];
+    pt = [self.mtkView convertPoint:[e locationInWindow] fromView:nil];
+    viewH = self.mtkView.bounds.size.height;
+    yTop = [self.mtkView isFlipped] ? pt.y : (viewH - pt.y);
+    colD = pt.x / CELL_PX;
+    rowD = yTop / CELL_PX;
+    col = FloorInt(colD);
+    row = FloorInt(rowD);
+    if (col < 0 || col >= self.gridW || row < 0 || row >= self.gridH) {
+        return;
+    }
+    cells = [self currentCells];
+    if (cells == nil) {
+        return;
+    }
+    for (k = 0; k < 5; k++) {
+        cx = col + kBrush[k][0];
+        cy = row + kBrush[k][1];
+        gol_set_plane(cells, self.gridW, self.gridH, cx, cy, add);
     }
     [self markDirty];
 }
 
 - (void)waitLast {
-    if (_lastCB) {
-        [_lastCB waitUntilCompleted];
-        if (_lastCB.error) {
-            NSLog(@"command buffer error: %@", _lastCB.error);
+    if (self.lastCB != nil) {
+        [self.lastCB waitUntilCompleted];
+        if (self.lastCB.error != nil) {
+            NSLog(@"command buffer error: %@", self.lastCB.error);
         }
-        _lastCB = nil;
+        self.lastCB = nil;
     }
 }
 
 - (uint16_t *)planePointer:(uint32_t)plane {
-    if (!_gridBuf) return nil;
-    return (uint16_t *)[_gridBuf contents] + (size_t)plane * (size_t)_planeCells;
+    uint16_t *base;
+    if (self.gridBuf == nil) {
+        return nil;
+    }
+    base = (uint16_t *)[self.gridBuf contents];
+    return base + (size_t)plane * (size_t)self.planeCells;
 }
 
 - (uint16_t *)currentCells {
-    return [self planePointer:(uint32_t)(_frameIndex % (uint32_t)PLANE_COUNT)];
+    return [self planePointer:(uint32_t)(self.frameIndex % (uint32_t)PLANE_COUNT)];
 }
 
 - (void)updateGridForPixelSize:(CGSize)pixelSize {
-    if (!_gridBuf || !_mtkView) return;
-    if (pixelSize.width < 1.0 || pixelSize.height < 1.0) return;
+    CGFloat scale;
+    double newWD;
+    double newHD;
+    int newW;
+    int newH;
+    double shrink;
+    int oldW;
+    int oldH;
+    uint16_t *base;
+    uint16_t *oldPlane;
+    uint16_t *tmp;
+    uint32_t p;
 
-    CGFloat scale = _mtkView.window ? _mtkView.window.backingScaleFactor : 1.0;
-    if (scale < 1.0) scale = 1.0;
-
-    int newW = (int)floor(pixelSize.width / (CELL_PX * scale));
-    int newH = (int)floor(pixelSize.height / (CELL_PX * scale));
-    newW = MAX(8, MIN(newW, _maxGridW));
-    newH = MAX(8, MIN(newH, _maxGridH));
-
-    if ((NSUInteger)newW * (NSUInteger)newH > _planeCells) {
-        double shrink = sqrt((double)_planeCells / ((double)newW * (double)newH));
-        newW = MAX(8, (int)floor(newW * shrink));
-        newH = MAX(8, (int)floor(newH * shrink));
+    if (self.gridBuf == nil || self.mtkView == nil) {
+        return;
+    }
+    if (pixelSize.width < 1.0 || pixelSize.height < 1.0) {
+        return;
     }
 
-    if (newW == _gridW && newH == _gridH) return;
+    scale = self.mtkView.window ? self.mtkView.window.backingScaleFactor : 1.0;
+    if (scale < 1.0) {
+        scale = 1.0;
+    }
+
+    newWD = pixelSize.width / (CELL_PX * scale);
+    newHD = pixelSize.height / (CELL_PX * scale);
+    newW = FloorInt(newWD);
+    newH = FloorInt(newHD);
+    newW = GOL_MAX(8, GOL_MIN(newW, self.maxGridW));
+    newH = GOL_MAX(8, GOL_MIN(newH, self.maxGridH));
+
+    if ((NSUInteger)newW * (NSUInteger)newH > self.planeCells) {
+        shrink = sqrt((double)self.planeCells / ((double)newW * (double)newH));
+        newW = GOL_MAX(8, FloorInt((double)newW * shrink));
+        newH = GOL_MAX(8, FloorInt((double)newH * shrink));
+    }
+
+    if (newW == self.gridW && newH == self.gridH) {
+        return;
+    }
 
     [self waitLast];
-    for (int i = 0; i < PLANE_COUNT; i++) {
-        _cbRing[i] = nil;
+    [self clearCBRing];
+
+    oldW = self.gridW;
+    oldH = self.gridH;
+    base = (uint16_t *)[self.gridBuf contents];
+    oldPlane = base + (size_t)self.displayPlane * (size_t)self.planeCells;
+    tmp = (uint16_t *)calloc(self.planeCells, sizeof(uint16_t));
+    if (tmp == nil) {
+        return;
     }
 
-    int oldW = _gridW;
-    int oldH = _gridH;
-    uint16_t *base = (uint16_t *)[_gridBuf contents];
-    uint16_t *oldPlane = base + (size_t)_displayPlane * (size_t)_planeCells;
-    uint16_t *tmp = calloc(_planeCells, sizeof(uint16_t));
-    if (!tmp) return;
+    gol_resize_copy(oldPlane, oldW, oldH, tmp, newW, newH, self.planeCells);
+    self.gridW = newW;
+    self.gridH = newH;
 
-    gol_resize_copy(oldPlane, oldW, oldH, tmp, newW, newH, _planeCells);
-    _gridW = newW;
-    _gridH = newH;
-
-    memcpy(base, tmp, _planeCells * sizeof(uint16_t));
-    for (uint32_t p = 1; p < (uint32_t)PLANE_COUNT; p++) {
-        memset(base + (size_t)p * (size_t)_planeCells, 0, _planeBytes);
+    memcpy(base, tmp, (size_t)self.planeCells * sizeof(uint16_t));
+    for (p = 1; p < (uint32_t)PLANE_COUNT; p++) {
+        memset(base + (size_t)p * (size_t)self.planeCells, 0, self.planeBytes);
     }
     free(tmp);
 
-    _frameIndex = 0;
-    _displayPlane = 0;
+    self.frameIndex = 0;
+    self.displayPlane = 0;
     [self rebuildCellTexture];
 }
 
 - (void)rebuildCellTexture {
-    if (!_device || !_mtkView) return;
-    NSUInteger w = (NSUInteger)MAX(1, _gridW) * (NSUInteger)RENDER_SCALE;
-    NSUInteger h = (NSUInteger)MAX(1, _gridH) * (NSUInteger)RENDER_SCALE;
-    w = MIN(w, (NSUInteger)16384);
-    h = MIN(h, (NSUInteger)16384);
-    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:_mtkView.colorPixelFormat
-                                                                                 width:w
-                                                                                 height:h
-                                                                             mipmapped:NO];
-    d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    NSUInteger w;
+    NSUInteger h;
+    MTLTextureDescriptor *d;
+
+    if (self.device == nil || self.mtkView == nil) {
+        return;
+    }
+    w = (NSUInteger)GOL_MAX(1, self.gridW) * (NSUInteger)RENDER_SCALE;
+    h = (NSUInteger)GOL_MAX(1, self.gridH) * (NSUInteger)RENDER_SCALE;
+    w = GOL_MIN(w, (NSUInteger)16384);
+    h = GOL_MIN(h, (NSUInteger)16384);
+    d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:self.mtkView.colorPixelFormat
+                                                           width:w
+                                                          height:h
+                                                      mipmapped:NO];
+    d.usage = (MTLTextureUsage)(MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead);
     d.storageMode = MTLStorageModePrivate;
-    _cellTex = [_device newTextureWithDescriptor:d];
+    self.cellTex = [self.device newTextureWithDescriptor:d];
 }
 
 - (void)markDirty {
-    _dirty = YES;
-    if (_mtkView) {
-        _mtkView.paused = NO;
+    self.dirty = YES;
+    if (self.mtkView != nil) {
+        self.mtkView.paused = NO;
     }
-}
-
-static NSButton *makeToggle(NSString *text, NSRect frame, BOOL on, NSInteger tag, id target, SEL action) {
-    NSButton *btn = [[NSButton alloc] initWithFrame:frame];
-    btn.bezelStyle = NSBezelStyleRounded;
-    btn.state = on ? NSControlStateValueOn : NSControlStateValueOff;
-    btn.tag = tag;
-    btn.allowsMixedState = NO;
-    btn.title = @"";
-    btn.wantsLayer = YES;
-    btn.layer.backgroundColor = on ?
-        [NSColor colorWithSRGBRed:0.3 green:0.85 blue:0.4 alpha:1.0].CGColor :
-        [NSColor colorWithSRGBRed:0.22 green:0.25 blue:0.32 alpha:1.0].CGColor;
-    btn.layer.cornerRadius = frame.size.width / 2.0;
-    btn.target = target;
-    btn.action = action;
-    
-    NSTextField *label = [NSTextField labelWithString:text];
-    label.frame = NSMakeRect(0, 0, frame.size.width, frame.size.height);
-    label.font = [NSFont systemFontOfSize:10 weight:NSFontWeightMedium];
-    label.textColor = on ? [NSColor whiteColor] : [NSColor colorWithSRGBRed:0.55 green:0.60 blue:0.68 alpha:1.0];
-    label.alignment = NSTextAlignmentCenter;
-    label.backgroundColor = [NSColor clearColor];
-    label.selectable = NO;
-    label.editable = NO;
-    [btn addSubview:label];
-    
-    return btn;
 }
 
 - (void)setupUI {
-    NSRect content = NSMakeRect(0, 0, VIEW_W, VIEW_H + BAR_H);
-    _window = [[NSWindow alloc] initWithContentRect:content
-                                            styleMask:(NSWindowStyleMaskTitled |
-                                                        NSWindowStyleMaskClosable |
-                                                        NSWindowStyleMaskMiniaturizable |
-                                                        NSWindowStyleMaskResizable)
-                                              backing:NSBackingStoreBuffered
-                                                defer:NO];
-    _window.releasedWhenClosed = NO;
-    [_window setTitle:@"Game of Life"];
-    [_window setContentSize:content.size];
-    [_window setBackgroundColor:[NSColor colorWithSRGBRed:0.04 green:0.05 blue:0.08 alpha:1.0]];
-    [_window setDelegate:self];
-    [_window center];
+    NSRect content;
+    NSScreen *screen;
+    NSView *contentView;
+    NSView *bar;
+    CGFloat x;
+    CGFloat y;
+    NSButton *resetButton;
+    NSPopUpButton *presetsPopup;
+    __weak App *weakSelf;
 
-    NSScreen *screen = _window.screen ?: [NSScreen mainScreen];
-    _window.minSize = NSMakeSize(500.0, 350.0 + (CGFloat)BAR_H);
-    _window.maxSize = NSMakeSize(screen.frame.size.width, screen.frame.size.height);
+    content = NSMakeRect(0, 0, VIEW_W, VIEW_H + BAR_H);
+    self.window = [[NSWindow alloc] initWithContentRect:content
+                                              styleMask:(NSWindowStyleMask)(NSWindowStyleMaskTitled |
+                                                                            NSWindowStyleMaskClosable |
+                                                                            NSWindowStyleMaskMiniaturizable |
+                                                                            NSWindowStyleMaskResizable)
+                                                backing:NSBackingStoreBuffered
+                                                  defer:NO];
+    self.window.releasedWhenClosed = NO;
+    [self.window setTitle:@"Game of Life"];
+    [self.window setContentSize:content.size];
+    [self.window setBackgroundColor:[NSColor colorWithSRGBRed:0.04 green:0.05 blue:0.08 alpha:1.0]];
+    [self.window setDelegate:self];
+    [self.window center];
 
-    NSView *contentView = [_window contentView];
-    _mtkView.frame = NSMakeRect(0, BAR_H, VIEW_W, VIEW_H);
-    _mtkView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    [contentView addSubview:_mtkView];
+    screen = ScreenForWindow(self.window);
+    self.window.minSize = NSMakeSize(500.0, 350.0 + (CGFloat)BAR_H);
+    self.window.maxSize = NSMakeSize(screen.frame.size.width, screen.frame.size.height);
 
-    NSView *bar = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, VIEW_W, BAR_H)];
+    contentView = [self.window contentView];
+    self.mtkView.frame = NSMakeRect(0, BAR_H, VIEW_W, VIEW_H);
+    self.mtkView.autoresizingMask = (NSAutoresizingMaskOptions)(NSViewWidthSizable | NSViewHeightSizable);
+    [contentView addSubview:self.mtkView];
+
+    bar = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, VIEW_W, BAR_H)];
     bar.wantsLayer = YES;
-    bar.autoresizingMask = NSViewWidthSizable;
+    bar.autoresizingMask = (NSAutoresizingMaskOptions)NSViewWidthSizable;
     bar.layer.backgroundColor = [NSColor colorWithSRGBRed:0.07 green:0.08 blue:0.11 alpha:1.0].CGColor;
     [contentView addSubview:bar];
-    
-    CGFloat x = 12;
-    CGFloat y = 8;
-    CGFloat btnW = 24;
-    CGFloat btnH = 24;
-    CGFloat btnGap = 4;
-    
-    // FPS label
-    _fpsLabel = MakeLabel(@"FPS --", NSMakeRect(x, y, 80, 18));
-    [bar addSubview:_fpsLabel];
+
+    x = 12;
+    y = 8;
+
+    self.fpsLabel = MakeLabel(@"FPS --", NSMakeRect(x, y, 80, 18));
+    [bar addSubview:self.fpsLabel];
     x += 90;
-    
-    // Rule section
-    [bar addSubview:MakeLabelSmall(@"B", NSMakeRect(x, y - 2, 14, 22))];
-    x += 18;
-    for (int i = 0; i < 9; i++) {
-        _ruleToggles[i] = makeToggle([NSString stringWithFormat:@"%d", i],
-                                      NSMakeRect(x, y - 2, btnW, btnH),
-                                      (_rules.birth >> i) & 1u,
-                                      i, self, @selector(ruleToggled:));
-        [bar addSubview:_ruleToggles[i]];
-        x += btnW + btnGap;
-    }
-    
+
+    [bar addSubview:MakeLabelSmall(@"B:", NSMakeRect(x, y - 2, 16, 22))];
+    x += 20;
+    self.birthRangeView = [[GOLRangeSlider alloc] initWithFrame:NSMakeRect(x, y - 4, 180, 28)
+                                                       minValue:0
+                                                            max:8
+                                                     defaultMin:3
+                                                     defaultMax:3];
+    [bar addSubview:self.birthRangeView];
+    x += 188;
+
+    [bar addSubview:MakeLabelSmall(@"S:", NSMakeRect(x, y - 2, 16, 22))];
+    x += 20;
+    self.survRangeView = [[GOLRangeSlider alloc] initWithFrame:NSMakeRect(x, y - 4, 180, 28)
+                                                      minValue:0
+                                                           max:8
+                                                    defaultMin:2
+                                                    defaultMax:3];
+    [bar addSubview:self.survRangeView];
+    x += 188;
+
     x += 8;
-    [bar addSubview:MakeLabelSmall(@"S", NSMakeRect(x, y - 2, 14, 22))];
-    x += 18;
-    for (int i = 0; i < 9; i++) {
-        _ruleTSurv[i] = makeToggle([NSString stringWithFormat:@"%d", i],
-                                    NSMakeRect(x, y - 2, btnW, btnH),
-                                    (_rules.survival >> i) & 1u,
-                                    i + 10, self, @selector(ruleToggled:));
-        [bar addSubview:_ruleTSurv[i]];
-        x += btnW + btnGap;
-    }
-    
-    x += 8;
-    _ruleLabel = MakeLabelSmall(@"B3/S23", NSMakeRect(x, y - 2, 100, 22));
-    [bar addSubview:_ruleLabel];
+    self.ruleLabel = MakeLabel(@"B3/S23", NSMakeRect(x, y - 2, 120, 22));
+    [bar addSubview:self.ruleLabel];
     x += 110;
-    
-    _popLabel = MakeLabelSmall(@"Pop: 0", NSMakeRect(x, y - 2, 90, 22));
-    [bar addSubview:_popLabel];
+
+    self.popLabel = MakeLabelSmall(@"Pop: 0", NSMakeRect(x, y - 2, 90, 22));
+    [bar addSubview:self.popLabel];
     x += 100;
-    
-    _maxAgeLabel = MakeLabelSmall(@"Age: 0", NSMakeRect(x, y - 2, 70, 22));
-    [bar addSubview:_maxAgeLabel];
+
+    self.maxAgeLabel = MakeLabelSmall(@"Age: 0", NSMakeRect(x, y - 2, 70, 22));
+    [bar addSubview:self.maxAgeLabel];
     x += 80;
-    
-    // --- Second row ---
+
     y = 38;
     x = 12;
-    
+
     [bar addSubview:MakeLabelSmall(@"Density", NSMakeRect(x, y, 55, 18))];
     x += 60;
-    
-    _densitySlider = [[NSSlider alloc] initWithFrame:NSMakeRect(x, y - 3, 100, 20)];
-    _densitySlider.minValue = 0.0;
-    _densitySlider.maxValue = 1.0;
-    _densitySlider.doubleValue = 0.2;
-    _densitySlider.allowsTickMarkValuesOnly = NO;
-    _densitySlider.numberOfTickMarks = 0;
-    _densitySlider.continuous = YES;
-    _densitySlider.target = self;
-    _densitySlider.action = @selector(sliderChanged:);
-    [bar addSubview:_densitySlider];
+
+    self.densitySlider = [[NSSlider alloc] initWithFrame:NSMakeRect(x, y - 3, 100, 20)];
+    self.densitySlider.minValue = 0.0;
+    self.densitySlider.maxValue = 1.0;
+    self.densitySlider.doubleValue = 0.2;
+    self.densitySlider.allowsTickMarkValuesOnly = NO;
+    self.densitySlider.numberOfTickMarks = 0;
+    self.densitySlider.continuous = YES;
+    self.densitySlider.target = self;
+    self.densitySlider.action = @selector(sliderChanged:);
+    [bar addSubview:self.densitySlider];
     x += 110;
-    
-    _densityPct = MakeLabelSmall(@"20%", NSMakeRect(x, y, 35, 18));
-    [bar addSubview:_densityPct];
+
+    self.densityPct = MakeLabelSmall(@"20%", NSMakeRect(x, y, 35, 18));
+    [bar addSubview:self.densityPct];
     x += 45;
-    
+
     [bar addSubview:MakeLabelSmall(@"Speed", NSMakeRect(x, y, 45, 18))];
     x += 50;
-    
-    _speedSlider = [[NSSlider alloc] initWithFrame:NSMakeRect(x, y - 3, 120, 20)];
-    _speedSlider.minValue = 1.0;
-    _speedSlider.maxValue = 120.0;
-    _speedSlider.doubleValue = 30.0;
-    _speedSlider.allowsTickMarkValuesOnly = NO;
-    _speedSlider.numberOfTickMarks = 6;
-    _speedSlider.continuous = YES;
-    _speedSlider.target = self;
-    _speedSlider.action = @selector(sliderChanged:);
-    [bar addSubview:_speedSlider];
+
+    self.speedSlider = [[NSSlider alloc] initWithFrame:NSMakeRect(x, y - 3, 120, 20)];
+    self.speedSlider.minValue = 1.0;
+    self.speedSlider.maxValue = 120.0;
+    self.speedSlider.doubleValue = 30.0;
+    self.speedSlider.allowsTickMarkValuesOnly = NO;
+    self.speedSlider.numberOfTickMarks = 6;
+    self.speedSlider.continuous = YES;
+    self.speedSlider.target = self;
+    self.speedSlider.action = @selector(sliderChanged:);
+    [bar addSubview:self.speedSlider];
     x += 130;
-    
-    _speedLabel = MakeLabelSmall(@"30 gen/s", NSMakeRect(x, y, 65, 18));
-    [bar addSubview:_speedLabel];
+
+    self.speedLabel = MakeLabelSmall(@"30 gen/s", NSMakeRect(x, y, 65, 18));
+    [bar addSubview:self.speedLabel];
     x += 75;
-    
+
     [bar addSubview:MakeLabelSmall(@"Preset", NSMakeRect(x, y, 45, 18))];
     x += 50;
-    
-    _presetsPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(x, y - 3, 120, 24)
-                                                 pullsDown:NO];
-    [_presetsPopup addItemWithTitle:@"Glider"];
-    [_presetsPopup addItemWithTitle:@"Blinker"];
-    [_presetsPopup addItemWithTitle:@"Block"];
-    [_presetsPopup addItemWithTitle:@"Beacon"];
-    [_presetsPopup addItemWithTitle:@"Toad"];
-    [_presetsPopup addItemWithTitle:@"Pentadecathlon"];
-    [_presetsPopup addItemWithTitle:@"LWSS"];
-    [_presetsPopup addItemWithTitle:@"R-Pentomino"];
-    [_presetsPopup addItemWithTitle:@"Heptomino"];
-    [_presetsPopup setTarget:self];
-    [_presetsPopup setAction:@selector(rulePresetClicked:)];
-    [bar addSubview:_presetsPopup];
+
+    presetsPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(x, y - 3, 120, 24)
+                                                pullsDown:NO];
+    [presetsPopup addItemWithTitle:@"Glider"];
+    [presetsPopup addItemWithTitle:@"Blinker"];
+    [presetsPopup addItemWithTitle:@"Block"];
+    [presetsPopup addItemWithTitle:@"Beacon"];
+    [presetsPopup addItemWithTitle:@"Toad"];
+    [presetsPopup addItemWithTitle:@"Pentadecathlon"];
+    [presetsPopup addItemWithTitle:@"LWSS"];
+    [presetsPopup addItemWithTitle:@"R-Pentomino"];
+    [presetsPopup addItemWithTitle:@"Heptomino"];
+    [presetsPopup setTarget:self];
+    [presetsPopup setAction:@selector(rulePresetClicked:)];
+    [bar addSubview:presetsPopup];
     x += 130;
-    
-    _goButton = [[NSButton alloc] initWithFrame:NSMakeRect(x, y - 3, 65, 24)];
-    _goButton.title = @"Go";
-    _goButton.bezelStyle = NSBezelStyleRounded;
-    _goButton.target = self;
-    _goButton.action = @selector(goPause:);
-    [bar addSubview:_goButton];
+
+    self.goButton = [[NSButton alloc] initWithFrame:NSMakeRect(x, y - 3, 65, 24)];
+    self.goButton.title = @"Go";
+    self.goButton.bezelStyle = NSBezelStyleRounded;
+    self.goButton.target = self;
+    self.goButton.action = @selector(goPause:);
+    [bar addSubview:self.goButton];
     x += 75;
-    
-    NSButton *resetButton = [[NSButton alloc] initWithFrame:NSMakeRect(x, y - 3, 65, 24)];
+
+    resetButton = [[NSButton alloc] initWithFrame:NSMakeRect(x, y - 3, 65, 24)];
     resetButton.title = @"Reset";
     resetButton.bezelStyle = NSBezelStyleRounded;
     resetButton.target = self;
     resetButton.action = @selector(reset:);
     [bar addSubview:resetButton];
     x += 75;
-    
-    _genLabel = MakeLabelSmall(@"Gen 0", NSMakeRect(x, y, 90, 18));
-    [bar addSubview:_genLabel];
-    x += 100;
-    
-    [bar addSubview:MakeLabelSmall(@"L:add  R:erase", NSMakeRect(x, y, 120, 18))];
-    
-    [self updateRuleUI];
-    [_window makeKeyAndOrderFront:nil];
-}
 
+    self.genLabel = MakeLabelSmall(@"Gen 0", NSMakeRect(x, y, 90, 18));
+    [bar addSubview:self.genLabel];
+    x += 100;
+
+    [bar addSubview:MakeLabelSmall(@"L:add  R:erase", NSMakeRect(x, y, 120, 18))];
+
+    weakSelf = self;
+    self.birthRangeView.rangeChanged = ^{
+        App *strongSelf = weakSelf;
+        if (strongSelf != nil) {
+            [strongSelf ruleSliderChanged:strongSelf];
+        }
+    };
+    self.survRangeView.rangeChanged = ^{
+        App *strongSelf = weakSelf;
+        if (strongSelf != nil) {
+            [strongSelf ruleSliderChanged:strongSelf];
+        }
+    };
+
+    [self updateRuleUI];
+    [self.window makeKeyAndOrderFront:nil];
+}
 
 - (void)drawInMTKView:(MTKView *)view {
     (void)view;
@@ -736,141 +1166,203 @@ static NSButton *makeToggle(NSString *text, NSRect frame, BOOL on, NSInteger tag
     [self markDirty];
 }
 
-- (void)tick {
-    if (!_mtkView || !_queue || !_renderPipeline || !_scalePipeline ||
-        !_uniformsBuf || !_gridBuf) return;
+- (id<MTLCommandBuffer>)cbAt:(uint32_t)plane {
+    uint32_t index = plane % (uint32_t)PLANE_COUNT;
+    switch (index) {
+        case 0:
+            return self.cb0;
+        case 1:
+            return self.cb1;
+        default:
+            return self.cb2;
+    }
+}
 
-    // If paused and nothing changed, stop asking the display link for work.
-    if (!_running && !_dirty) {
-        _mtkView.paused = YES;
+- (void)setCB:(id<MTLCommandBuffer>)cb at:(uint32_t)plane {
+    uint32_t index = plane % (uint32_t)PLANE_COUNT;
+    switch (index) {
+        case 0:
+            self.cb0 = cb;
+            break;
+        case 1:
+            self.cb1 = cb;
+            break;
+        default:
+            self.cb2 = cb;
+            break;
+    }
+}
+
+- (void)clearCBRing {
+    self.cb0 = nil;
+    self.cb1 = nil;
+    self.cb2 = nil;
+}
+
+- (void)tick {
+    id<CAMetalDrawable> drawable;
+    id<MTLCommandBuffer> cb;
+    uint64_t f;
+    uint32_t slot;
+    uint32_t curPlane;
+    uint32_t renderPlane;
+    uint32_t writePlane;
+    BOOL willStep;
+    CFTimeInterval now;
+    CFTimeInterval frameDt;
+    GOLRules r;
+    Uniforms *u;
+    double genPerSec;
+    double genInterval;
+    int gensToAdvance;
+    id<MTLCommandBuffer> oldest;
+    BOOL oldestDone;
+    NSUInteger curByte;
+    NSUInteger writeByte;
+    NSUInteger tgW;
+    NSUInteger tgH;
+    NSUInteger gx;
+    NSUInteger gy;
+    id<MTLComputeCommandEncoder> enc;
+    uint16_t *cur;
+    uint16_t *write;
+    MTLRenderPassDescriptor *crp;
+    id<MTLRenderCommandEncoder> cenc;
+    MTLViewport cvp;
+    MTLRenderPassDescriptor *rp;
+    id<MTLRenderCommandEncoder> rend;
+    MTLViewport vp;
+    BOOL needCell;
+    uint16_t *cells;
+    int alive;
+    int maxAge;
+    CFTimeInterval fpsDt;
+    int fps;
+
+    if (self.mtkView == nil || self.queue == nil || self.renderPipeline == nil ||
+        self.scalePipeline == nil || self.uniformsBuf == nil || self.gridBuf == nil) {
         return;
     }
 
-    // 1. Ask MTKView for the next drawable and create this frame's command buffer.
-    id<CAMetalDrawable> drawable = _mtkView.currentDrawable;
-    if (!drawable) return;
-    id<MTLCommandBuffer> cb = [_queue commandBuffer];
-    if (!cb) return;
+    if (!self.running && !self.dirty) {
+        self.mtkView.paused = YES;
+        return;
+    }
 
-    // 2. Choose the grid planes for this frame using the triple-buffer ring.
-    uint64_t f = _frameIndex;
-    uint32_t slot = (uint32_t)(f % (uint32_t)PLANE_COUNT);
-    uint32_t curPlane = (uint32_t)(f % (uint32_t)PLANE_COUNT);
-    uint32_t renderPlane = _displayPlane;
-    BOOL willStep = NO;
+    drawable = self.mtkView.currentDrawable;
+    if (drawable == nil) {
+        return;
+    }
+    cb = [self.queue commandBuffer];
+    if (cb == nil) {
+        return;
+    }
 
-    // Speed control: accumulate time, advance generations based on slider
-    CFTimeInterval now = CFAbsoluteTimeGetCurrent();
-    
-    // Update uniforms BEFORE any GPU work so shaders see correct rules
-    Uniforms *u = (Uniforms *)[_uniformsBuf contents];
-    u->gridW = (uint32_t)_gridW;
-    u->gridH = (uint32_t)_gridH;
+    f = self.frameIndex;
+    slot = (uint32_t)(f % (uint32_t)PLANE_COUNT);
+    curPlane = slot;
+    renderPlane = self.displayPlane;
+    writePlane = 0;
+    willStep = NO;
+
+    now = CFAbsoluteTimeGetCurrent();
+
+    r = self.rules;
+    u = (Uniforms *)[self.uniformsBuf contents];
+    u->gridW = (uint32_t)self.gridW;
+    u->gridH = (uint32_t)self.gridH;
     u->pad = 0;
-    u->birth = (uint8_t)_rules.birth;
-    u->survival = (uint8_t)_rules.survival;
+    u->birth = r.birth;
+    u->survival = r.survival;
     u->pad2 = 0;
     u->pad3 = 0;
-    
-    if (_running) {
-        // Debug: print population every 30 frames
-        static int debugCount = 0;
-        if (debugCount++ % 30 == 0) {
-            int alive = 0, maxAge = 0;
-            gol_count_alive([self currentCells], _gridW, _gridH, &alive, &maxAge);
-            NSLog(@"[debug] gen=%u pop=%d maxAge=%d birth=0x%02x survival=0x%02x",
-                  _gen, alive, maxAge, _rules.birth, _rules.survival);
+
+    if (self.running) {
+        genPerSec = self.speedSlider ? self.speedSlider.doubleValue : 30.0;
+        if (genPerSec < 1.0) {
+            genPerSec = 1.0;
         }
-        
-        double genPerSec = _speedSlider ? _speedSlider.doubleValue : 30.0;
-        if (genPerSec < 1.0) genPerSec = 1.0;
-        double genInterval = 1.0 / genPerSec;
-        _genAccum += (now - _fpsLast > 0 && _fpsLast > 0) ? (now - _fpsLast) : genInterval;
-        
-        // Advance multiple generations if needed (e.g., slow computer catching up)
-        int gensToAdvance = (int)floor(_genAccum / genInterval);
-        gensToAdvance = MIN(gensToAdvance, 5); // cap at 5 per frame
-        _genAccum -= gensToAdvance * genInterval;
-        
+        genInterval = 1.0 / genPerSec;
+        frameDt = now - self.simLastTime;
+        self.genAccum += (frameDt > 0 && self.simLastTime > 0) ? frameDt : genInterval;
+        self.simLastTime = now;
+
+        gensToAdvance = FloorInt(self.genAccum / genInterval);
+        gensToAdvance = GOL_MIN(gensToAdvance, 5);
+        self.genAccum -= (double)gensToAdvance * genInterval;
+
         if (gensToAdvance > 0) {
-            // We only advance one generation per frame on GPU (single command buffer)
-            // For multiple gens, we'd need a different approach. Just advance 1.
             gensToAdvance = 1;
         }
 
-        if (gensToAdvance > 0 && _stepPipeline) {
-            id<MTLCommandBuffer> oldest = _cbRing[slot];
-            BOOL oldestDone = !oldest ||
-                              oldest.status == MTLCommandBufferStatusCompleted ||
-                              oldest.status == MTLCommandBufferStatusError;
+        if (gensToAdvance > 0 && self.stepPipeline != nil) {
+            oldest = [self cbAt:slot];
+            oldestDone = (oldest == nil) ||
+                          oldest.status == MTLCommandBufferStatusCompleted ||
+                          oldest.status == MTLCommandBufferStatusError;
             if (oldestDone) {
-                uint32_t writePlane = (curPlane + 1) % (uint32_t)PLANE_COUNT;
-                NSUInteger curByte = (NSUInteger)curPlane * _planeBytes;
-                NSUInteger writeByte = (NSUInteger)writePlane * _planeBytes;
-                const NSUInteger TGW = 16;
-                const NSUInteger TGH = 16;
-                NSUInteger gx = ((NSUInteger)_gridW + TGW - 1) / TGW;
-                NSUInteger gy = ((NSUInteger)_gridH + TGH - 1) / TGH;
-                id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-                [enc setComputePipelineState:_stepPipeline];
-                [enc setBuffer:_gridBuf offset:curByte atIndex:0];
-                [enc setBuffer:_gridBuf offset:writeByte atIndex:1];
-                [enc setBuffer:_uniformsBuf offset:0 atIndex:2];
+                writePlane = (curPlane + 1) % (uint32_t)PLANE_COUNT;
+                curByte = (NSUInteger)curPlane * self.planeBytes;
+                writeByte = (NSUInteger)writePlane * self.planeBytes;
+                tgW = 16;
+                tgH = 16;
+                gx = ((NSUInteger)self.gridW + tgW - 1) / tgW;
+                gy = ((NSUInteger)self.gridH + tgH - 1) / tgH;
+                enc = [cb computeCommandEncoder];
+                [enc setComputePipelineState:self.stepPipeline];
+                [enc setBuffer:self.gridBuf offset:curByte atIndex:0];
+                [enc setBuffer:self.gridBuf offset:writeByte atIndex:1];
+                [enc setBuffer:self.uniformsBuf offset:0 atIndex:2];
                 [enc dispatchThreadgroups:MakeSize((int)gx, (int)gy, 1)
-                  threadsPerThreadgroup:MakeSize((int)TGW, (int)TGH, 1)];
+                  threadsPerThreadgroup:MakeSize((int)tgW, (int)tgH, 1)];
                 [enc endEncoding];
                 renderPlane = writePlane;
-                _displayPlane = writePlane;
+                self.displayPlane = writePlane;
                 willStep = YES;
+                [self setCB:cb at:writePlane];
             }
         } else if (gensToAdvance > 0) {
-            // CPU fallback
-            uint32_t writePlane = (curPlane + 1) % (uint32_t)PLANE_COUNT;
-            uint16_t *cur = [self planePointer:curPlane];
-            uint16_t *write = [self planePointer:writePlane];
-            if (cur && write) {
-                gol_step_cpu(cur, write, _gridW, _gridH, _rules);
+            writePlane = (curPlane + 1) % (uint32_t)PLANE_COUNT;
+            cur = [self planePointer:curPlane];
+            write = [self planePointer:writePlane];
+            if (cur != nil && write != nil) {
+                gol_step_cpu(cur, write, self.gridW, self.gridH, r);
                 renderPlane = writePlane;
-                _displayPlane = writePlane;
+                self.displayPlane = writePlane;
                 willStep = YES;
             }
         }
     }
 
-    // 4. Update curOffset for render pass (grid/plane may have changed)
-    u->curOffset = (uint32_t)renderPlane * (uint32_t)_planeCells;
+    u->curOffset = (uint32_t)renderPlane * (uint32_t)self.planeCells;
 
-    // Re-render the small cell texture only when the visible grid changed.
-    BOOL needCell = willStep || _dirty;
-    if (needCell && _cellTex && _cellTex.width > 0 && _cellTex.height > 0) {
-        MTLRenderPassDescriptor *crp = [MTLRenderPassDescriptor renderPassDescriptor];
-        crp.colorAttachments[0].texture = _cellTex;
+    needCell = willStep || self.dirty;
+    if (needCell && self.cellTex != nil && self.cellTex.width > 0 && self.cellTex.height > 0) {
+        crp = [MTLRenderPassDescriptor renderPassDescriptor];
+        crp.colorAttachments[0].texture = self.cellTex;
         crp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
         crp.colorAttachments[0].storeAction = MTLStoreActionStore;
-        id<MTLRenderCommandEncoder> cenc = [cb renderCommandEncoderWithDescriptor:crp];
-        [cenc setRenderPipelineState:_renderPipeline];
-        MTLViewport cvp;
+        cenc = [cb renderCommandEncoderWithDescriptor:crp];
+        [cenc setRenderPipelineState:self.renderPipeline];
         cvp.originX = 0.0;
         cvp.originY = 0.0;
-        cvp.width = (double)_cellTex.width;
-        cvp.height = (double)_cellTex.height;
+        cvp.width = (double)self.cellTex.width;
+        cvp.height = (double)self.cellTex.height;
         cvp.znear = 0.0;
         cvp.zfar = 1.0;
         [cenc setViewport:cvp];
-        [cenc setFragmentBuffer:_gridBuf offset:0 atIndex:0];
-        [cenc setFragmentBuffer:_uniformsBuf offset:0 atIndex:1];
+        [cenc setFragmentBuffer:self.gridBuf offset:0 atIndex:0];
+        [cenc setFragmentBuffer:self.uniformsBuf offset:0 atIndex:1];
         [cenc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
         [cenc endEncoding];
     }
 
-    // 5. Scale the cell texture into the drawable.
-    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = drawable.texture;
     rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-    id<MTLRenderCommandEncoder> rend = [cb renderCommandEncoderWithDescriptor:rp];
-    [rend setRenderPipelineState:_scalePipeline];
-    MTLViewport vp;
+    rend = [cb renderCommandEncoderWithDescriptor:rp];
+    [rend setRenderPipelineState:self.scalePipeline];
     vp.originX = 0.0;
     vp.originY = 0.0;
     vp.width = (double)drawable.texture.width;
@@ -878,64 +1370,62 @@ static NSButton *makeToggle(NSString *text, NSRect frame, BOOL on, NSInteger tag
     vp.znear = 0.0;
     vp.zfar = 1.0;
     [rend setViewport:vp];
-    [rend setFragmentBuffer:_uniformsBuf offset:0 atIndex:0];
-    if (_cellTex) {
-        [rend setFragmentTexture:_cellTex atIndex:0];
+    [rend setFragmentBuffer:self.uniformsBuf offset:0 atIndex:0];
+    if (self.cellTex != nil) {
+        [rend setFragmentTexture:self.cellTex atIndex:0];
     }
     [rend drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
     [rend endEncoding];
 
-    // 6. Present and commit.
     [cb presentDrawable:drawable];
-    [cb addCompletedHandler:^(id<MTLCommandBuffer> b) {
-        if (b.error) {
-            NSLog(@"command buffer error: %@", b.error);
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> completedBuffer) {
+        if (completedBuffer.error != nil) {
+            NSLog(@"command buffer error: %@", completedBuffer.error);
         }
     }];
     [cb commit];
 
-    // 7. Update bookkeeping after the frame has been submitted.
     if (willStep) {
-        _frameIndex = f + 1;
-        _gen++;
+        self.frameIndex = f + 1u;
+        self.gen = self.gen + 1u;
     }
-    if (needCell && _cellTex) {
-        _dirty = NO;
+    if (needCell && self.cellTex != nil) {
+        self.dirty = NO;
     }
-    _cbRing[slot] = cb;
-    _lastCB = cb;
+    self.lastCB = cb;
 
-    if (_genLabel) {
-        _genLabel.stringValue = [NSString stringWithFormat:@"Gen %u", _gen];
-    }
-
-    // Update stats
-    int alive = 0;
-    int maxAge = 0;
-    gol_count_alive([self currentCells], _gridW, _gridH, &alive, &maxAge);
-    if (_popLabel) {
-        _popLabel.stringValue = [NSString stringWithFormat:@"Pop: %d", alive];
-    }
-    if (_maxAgeLabel) {
-        _maxAgeLabel.stringValue = [NSString stringWithFormat:@"MaxAge: %d", maxAge];
+    if (self.genLabel != nil) {
+        self.genLabel.stringValue = [NSString stringWithFormat:@"Gen %u", self.gen];
     }
 
-    _fpsFrames++;
-    _fpsLast = now;
-    if (_fpsFrames >= 10) {
-        CFTimeInterval dt = now - (_fpsLast - 0.5);
-        if (dt > 0) {
-            int fps = (int)lround((double)_fpsFrames / dt);
-            if (_fpsLabel) {
-                _fpsLabel.stringValue = [NSString stringWithFormat:@"FPS %d", fps];
+    cells = [self currentCells];
+    alive = 0;
+    maxAge = 0;
+    if (cells != nil) {
+        gol_count_alive(cells, self.gridW, self.gridH, &alive, &maxAge);
+    }
+    if (self.popLabel != nil) {
+        self.popLabel.stringValue = [NSString stringWithFormat:@"Pop: %d", alive];
+    }
+    if (self.maxAgeLabel != nil) {
+        self.maxAgeLabel.stringValue = [NSString stringWithFormat:@"MaxAge: %d", maxAge];
+    }
+
+    self.fpsFrames = self.fpsFrames + 1u;
+    if (now - self.fpsWindowStart >= 1.0) {
+        fpsDt = now - self.fpsWindowStart;
+        if (fpsDt > 0.0) {
+            fps = LroundInt((double)self.fpsFrames / fpsDt);
+            if (self.fpsLabel != nil) {
+                self.fpsLabel.stringValue = [NSString stringWithFormat:@"FPS %d", fps];
             }
         }
-        _fpsFrames = 0;
-        _fpsLast = now;
+        self.fpsWindowStart = now;
+        self.fpsFrames = 0;
     }
 
-    if (!_running && !_dirty) {
-        _mtkView.paused = YES;
+    if (!self.running && !self.dirty) {
+        self.mtkView.paused = YES;
     }
 }
 
@@ -948,12 +1438,13 @@ static NSButton *makeToggle(NSString *text, NSRect frame, BOOL on, NSInteger tag
 @end
 
 int main(int argc, const char *argv[]) {
+    App *app;
     (void)argc;
     (void)argv;
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-        App *app = [[App alloc] init];
+        app = [[App alloc] init];
         [NSApp setDelegate:app];
         [NSApp activateIgnoringOtherApps:YES];
         [NSApp run];
