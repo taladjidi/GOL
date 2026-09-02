@@ -41,6 +41,8 @@ static const int BAR_H = 120;
 static const int RENDER_SCALE = 1;
 static const int PLANE_COUNT = 3;
 static const uint32_t DISPLAY_AGE = 0u;
+static const uint32_t DISPLAY_TRAILS = 1u;
+static const uint32_t DISPLAY_HEATMAP = 2u;
 
 #define GOL_MIN(A, B) ((A) < (B) ? (A) : (B))
 #define GOL_MAX(A, B) ((A) > (B) ? (A) : (B))
@@ -326,7 +328,10 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 @property (nonatomic, strong) id<MTLRenderPipelineState> renderPipeline;
 @property (nonatomic, strong) id<MTLRenderPipelineState> scalePipeline;
 @property (nonatomic, strong) id<MTLComputePipelineState> stepPipeline;
+@property (nonatomic, strong) id<MTLComputePipelineState> trailStepPipeline;
+@property (nonatomic, strong) id<MTLComputePipelineState> trailClearPipeline;
 @property (nonatomic, strong) id<MTLTexture> cellTex;
+@property (nonatomic, strong) id<MTLTexture> trailTex;
 @property (nonatomic, strong) id<MTLBuffer> gridBuf;
 @property (nonatomic, strong) id<MTLBuffer> uniformsBuf;
 @property (nonatomic, strong) id<MTLCommandBuffer> cb0;
@@ -370,6 +375,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 @property (nonatomic, assign) CGFloat lastPanX;
 @property (nonatomic, assign) CGFloat lastPanY;
 @property (nonatomic, assign) uint32_t displayMode;
+@property (nonatomic, strong) NSPopUpButton *displayPopup;
 @property (nonatomic, strong) NSSegmentedControl *toolControl;
 @property (nonatomic, strong) NSSlider *brushSlider;
 @property (nonatomic, strong) NSTextField *brushLabel;
@@ -389,6 +395,8 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 - (void)updateZoomLabel;
 - (void)updateHintLabel;
 - (void)toolChanged:(id)sender;
+- (void)displayChanged:(id)sender;
+- (void)clearTrailNow;
 - (void)beginPanAtEvent:(NSEvent *)e;
 - (void)panWithEvent:(NSEvent *)e;
 - (void)endPan;
@@ -538,7 +546,10 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 @synthesize renderPipeline = _renderPipeline;
 @synthesize scalePipeline = _scalePipeline;
 @synthesize stepPipeline = _stepPipeline;
+@synthesize trailStepPipeline = _trailStepPipeline;
+@synthesize trailClearPipeline = _trailClearPipeline;
 @synthesize cellTex = _cellTex;
+@synthesize trailTex = _trailTex;
 @synthesize gridBuf = _gridBuf;
 @synthesize uniformsBuf = _uniformsBuf;
 @synthesize cb0 = _cb0;
@@ -582,6 +593,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 @synthesize lastPanX = _lastPanX;
 @synthesize lastPanY = _lastPanY;
 @synthesize displayMode = _displayMode;
+@synthesize displayPopup = _displayPopup;
 @synthesize toolControl = _toolControl;
 @synthesize brushSlider = _brushSlider;
 @synthesize brushLabel = _brushLabel;
@@ -636,6 +648,8 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     MTLRenderPipelineDescriptor *rp;
     MTLRenderPipelineDescriptor *sp;
     id<MTLFunction> stepFunc;
+    id<MTLFunction> trailStepFunc;
+    id<MTLFunction> trailClearFunc;
 
     self.device = MTLCreateSystemDefaultDevice();
     if (self.device == nil) {
@@ -723,6 +737,22 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     if (self.stepPipeline == nil) {
         NSLog(@"compute pipeline unavailable; using CPU fallback");
         self.stepPipeline = nil;
+    }
+
+    trailStepFunc = [self.library newFunctionWithName:@"trail_step"];
+    err = nil;
+    if (trailStepFunc != nil) {
+        self.trailStepPipeline = [self.device newComputePipelineStateWithFunction:trailStepFunc error:&err];
+    } else {
+        self.trailStepPipeline = nil;
+    }
+
+    trailClearFunc = [self.library newFunctionWithName:@"trail_clear"];
+    err = nil;
+    if (trailClearFunc != nil) {
+        self.trailClearPipeline = [self.device newComputePipelineStateWithFunction:trailClearFunc error:&err];
+    } else {
+        self.trailClearPipeline = nil;
     }
 
     [self rebuildCellTexture];
@@ -916,6 +946,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     self.displayPlane = 0;
     self.gen = 0;
     self.genAccum = 0;
+    [self clearTrailNow];
     cells = [self currentCells];
     if (cells == nil) {
         return;
@@ -965,6 +996,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     self.displayPlane = 0;
     self.gen = 0;
     self.genAccum = 0;
+    [self clearTrailNow];
     cells = [self currentCells];
     if (cells == nil) {
         return;
@@ -978,6 +1010,45 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
         self.genLabel.stringValue = @"Gen 0";
     }
     [self markDirty];
+}
+
+- (void)clearTrailNow {
+    id<MTLCommandBuffer> cb;
+    id<MTLComputeCommandEncoder> enc;
+    NSUInteger tgW;
+    NSUInteger tgH;
+    NSUInteger gx;
+    NSUInteger gy;
+
+    if (self.trailTex == nil || self.trailClearPipeline == nil ||
+        self.queue == nil) {
+        return;
+    }
+    [self waitLast];
+    cb = [self.queue commandBuffer];
+    if (cb == nil) {
+        return;
+    }
+    enc = [cb computeCommandEncoder];
+    if (enc == nil) {
+        return;
+    }
+    [enc setComputePipelineState:self.trailClearPipeline];
+    [enc setTexture:self.trailTex atIndex:0];
+    tgW = 16;
+    tgH = 16;
+    gx = (self.trailTex.width + tgW - 1) / tgW;
+    gy = (self.trailTex.height + tgH - 1) / tgH;
+    [enc dispatchThreadgroups:MakeSize((int)gx, (int)gy, 1)
+      threadsPerThreadgroup:MakeSize((int)tgW, (int)tgH, 1)];
+    [enc endEncoding];
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> completedBuffer) {
+        if (completedBuffer.error != nil) {
+            NSLog(@"trail clear error: %@", completedBuffer.error);
+        }
+    }];
+    [cb commit];
+    [cb waitUntilCompleted];
 }
 
 - (void)fit:(id)sender {
@@ -1039,6 +1110,23 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
         self.tool = 0;
     }
     [self updateHintLabel];
+}
+
+- (void)displayChanged:(id)sender {
+    int index;
+    (void)sender;
+    if (self.displayPopup == nil) {
+        return;
+    }
+    index = (int)self.displayPopup.indexOfSelectedItem;
+    if (index < 0 || index > (int)DISPLAY_HEATMAP) {
+        index = 0;
+    }
+    self.displayMode = (uint32_t)index;
+    if (self.displayMode == DISPLAY_TRAILS) {
+        [self clearTrailNow];
+    }
+    [self markDirty];
 }
 
 - (NSPoint)topPointForEvent:(NSEvent *)e {
@@ -1289,6 +1377,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     NSUInteger w;
     NSUInteger h;
     MTLTextureDescriptor *d;
+    MTLTextureDescriptor *td;
 
     if (self.device == nil || self.mtkView == nil) {
         return;
@@ -1298,12 +1387,20 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     w = GOL_MIN(w, (NSUInteger)16384);
     h = GOL_MIN(h, (NSUInteger)16384);
     d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:self.mtkView.colorPixelFormat
-                                                           width:w
-                                                          height:h
-                                                      mipmapped:NO];
+                                                            width:w
+                                                           height:h
+                                                       mipmapped:NO];
     d.usage = (MTLTextureUsage)(MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead);
     d.storageMode = MTLStorageModePrivate;
     self.cellTex = [self.device newTextureWithDescriptor:d];
+
+    td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                           width:w
+                                                          height:h
+                                                      mipmapped:NO];
+    td.usage = (MTLTextureUsage)(MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite);
+    td.storageMode = MTLStorageModePrivate;
+    self.trailTex = [self.device newTextureWithDescriptor:td];
 }
 
 - (void)markDirty {
@@ -1481,6 +1578,20 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 
     y = 68;
     x = 12;
+
+    [bar addSubview:MakeLabelSmall(@"Display", NSMakeRect(x, y, 50, 18))];
+    x += 55;
+
+    self.displayPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(x, y - 3, 90, 24)
+                                                     pullsDown:NO];
+    [self.displayPopup addItemWithTitle:@"Age"];
+    [self.displayPopup addItemWithTitle:@"Trails"];
+    [self.displayPopup addItemWithTitle:@"Heatmap"];
+    [self.displayPopup selectItemAtIndex:0];
+    self.displayPopup.target = self;
+    self.displayPopup.action = @selector(displayChanged:);
+    [bar addSubview:self.displayPopup];
+    x += 100;
 
     [bar addSubview:MakeLabelSmall(@"Tool", NSMakeRect(x, y, 35, 18))];
     x += 40;
@@ -1787,6 +1898,25 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
         [cenc endEncoding];
     }
 
+    if (self.displayMode == DISPLAY_TRAILS && self.trailStepPipeline != nil &&
+        self.trailTex != nil && self.cellTex != nil &&
+        self.trailTex.width > 0 && self.trailTex.height > 0) {
+        tgW = 16;
+        tgH = 16;
+        gx = (self.trailTex.width + tgW - 1) / tgW;
+        gy = (self.trailTex.height + tgH - 1) / tgH;
+        enc = [cb computeCommandEncoder];
+        if (enc != nil) {
+            [enc setComputePipelineState:self.trailStepPipeline];
+            [enc setTexture:self.cellTex atIndex:0];
+            [enc setTexture:self.trailTex atIndex:1];
+            [enc setTexture:self.trailTex atIndex:2];
+            [enc dispatchThreadgroups:MakeSize((int)gx, (int)gy, 1)
+              threadsPerThreadgroup:MakeSize((int)tgW, (int)tgH, 1)];
+            [enc endEncoding];
+        }
+    }
+
     rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = drawable.texture;
     rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
@@ -1803,6 +1933,9 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     [rend setFragmentBuffer:self.uniformsBuf offset:0 atIndex:0];
     if (self.cellTex != nil) {
         [rend setFragmentTexture:self.cellTex atIndex:0];
+    }
+    if (self.trailTex != nil) {
+        [rend setFragmentTexture:self.trailTex atIndex:1];
     }
     [rend drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
     [rend endEncoding];

@@ -75,12 +75,19 @@ static float3 Viridis(float t) {
     return mix(kViridis[i0], kViridis[i1], f);
 }
 
+constant uint kDisplayTrails = 1u;
+constant uint kDisplayHeatmap = 2u;
+
+static float3 Heat(float t) {
+    float3 cool = mix(float3(0.05f, 0.15f, 0.65f), float3(0.95f, 0.25f, 0.10f), t);
+    return mix(cool, float3(1.0f, 0.95f, 0.25f), smoothstep(0.65f, 1.0f, t));
+}
+
 // Renders the active grid plane into a small cell texture.
 // Cell packing: bit 0 = alive, bits 1..15 = age.
 [[fragment]] float4 fs_main(VSOut in [[stage_in]],
                             device const ushort *cells [[buffer(0)]],
-                            constant Uniforms &u [[buffer(1)]]) {
-    const float4 bg = float4(0.04f, 0.05f, 0.08f, 1.0f);
+                             constant Uniforms &u [[buffer(1)]]) {
 
     // Flip uv.y so grid row 0 is stored at the top of the cell texture.
     float2 cellF = float2(in.uv.x, 1.0f - in.uv.y) *
@@ -92,15 +99,20 @@ static float3 Viridis(float t) {
     ushort v = cells[idx];
 
     if ((v & 1u) == 0u) {
-        return bg;
+        return float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
     float age = static_cast<float>((v >> 1) & 0x7FFFu) / 100.0f;
-    return float4(Viridis(1.0f - age), 1.0f);
+    float t = 1.0f - min(age, 1.0f);
+    if (u.displayMode == kDisplayHeatmap) {
+        return float4(Heat(t), 1.0f);
+    }
+    return float4(Viridis(t), 1.0f);
 }
 
 // Scales the small cell texture to the drawable and draws cell gaps.
 [[fragment]] float4 fs_scale(VSOut in [[stage_in]],
                               texture2d<float> tex [[texture(0)]],
+                              texture2d<float> trail [[texture(1)]],
                               constant Uniforms &u [[buffer(0)]]) {
     const float4 bg = float4(0.04f, 0.05f, 0.08f, 1.0f);
     float2 viewSize = float2(max(u.viewWidth, 1.0f), max(u.viewHeight, 1.0f));
@@ -119,7 +131,12 @@ static float3 Viridis(float t) {
     int2 icell = int2(floor(gridF));
     icell = clamp(icell, int2(0, 0),
                   int2(static_cast<int>(u.gridW) - 1, static_cast<int>(u.gridH) - 1));
-    return tex.read(uint2(static_cast<uint>(icell.x), static_cast<uint>(icell.y)), 0);
+    uint2 tcoord = uint2(static_cast<uint>(icell.x), static_cast<uint>(icell.y));
+    float4 sample = (u.displayMode == kDisplayTrails) ? trail.read(tcoord, 0) : tex.read(tcoord, 0);
+    if (sample.a < 0.5f) {
+        return bg;
+    }
+    return float4(sample.r, sample.g, sample.b, 1.0f);
 }
 
 // Advances one generation: reads cur plane, writes next plane.
@@ -169,4 +186,26 @@ static float3 Viridis(float t) {
         out = 1u | (newAge << 1);
     }
     next[idx] = static_cast<ushort>(out);
+}
+
+// Fades the persistent trail texture and adds the current cell color.
+[[kernel]] void trail_step(texture2d<float, access::read> cell [[texture(0)]],
+                           texture2d<float, access::read> trailRead [[texture(1)]],
+                           texture2d<float, access::write> trailWrite [[texture(2)]],
+                           uint2 gid [[thread_position_in_grid]]) {
+    uint2 size = uint2(trailWrite.get_width(), trailWrite.get_height());
+    if (gid.x >= size.x || gid.y >= size.y) return;
+    float3 old = trailRead.read(gid).rgb * 0.94f;
+    float4 cur = cell.read(gid);
+    float3 added = cur.rgb * cur.a;
+    float3 out = max(old, added);
+    trailWrite.write(float4(out, 1.0f), gid);
+}
+
+// Zeroes the persistent trail texture.
+[[kernel]] void trail_clear(texture2d<float, access::write> trail [[texture(0)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+    uint2 size = uint2(trail.get_width(), trail.get_height());
+    if (gid.x >= size.x || gid.y >= size.y) return;
+    trail.write(float4(0.0f, 0.0f, 0.0f, 0.0f), gid);
 }
