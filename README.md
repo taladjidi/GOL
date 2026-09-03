@@ -27,6 +27,15 @@ classic presets, and three display modes.
   persistence), and Heatmap.
 - **Live stats**: generation, population, max age, and FPS.
 
+## Screenshots
+
+The **Display** button switches between three renderings of the same
+R-Pentomino simulation:
+
+| Age | Trails | Heatmap |
+| :---: | :---: | :---: |
+| ![Age mode](images/age.png) | ![Trails mode](images/trails.png) | ![Heatmap mode](images/heatmap.png) |
+
 ## Requirements
 
 - macOS with the Xcode Command Line Tools (`xcode-select --install`), which
