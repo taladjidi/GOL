@@ -616,6 +616,46 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 @synthesize hintLabel = _hintLabel;
 @synthesize keyMonitor = _keyMonitor;
 
+- (void)applyLaunchConfig {
+    NSArray<NSString *> *args;
+    NSString *mode = nil;
+    NSString *preset = nil;
+    const char *env;
+    double val;
+    NSUInteger i;
+    args = [[NSProcessInfo processInfo] arguments];
+    for (i = 1; i < args.count; i++) {
+        NSString *a = args[i];
+        if ([a hasPrefix:@"-"]) continue;
+        if (i + 1 < args.count) {
+            NSString *n = args[i + 1];
+            if ([a caseInsensitiveCompare:@"--mode"] == NSOrderedSame) { mode = n; i++; }
+            else if ([a caseInsensitiveCompare:@"--preset"] == NSOrderedSame) { preset = n; i++; }
+        }
+    }
+    if (mode == nil && (env = getenv("GOL_MODE")) != NULL) mode = [NSString stringWithUTF8String:env];
+    if (preset == nil && (env = getenv("GOL_PRESET")) != NULL) preset = [NSString stringWithUTF8String:env];
+    if ((env = getenv("GOL_DENSITY")) != NULL && self.densitySlider != nil) {
+        val = atof(env);
+        if (val < 0.0) val = 0.0;
+        if (val > 1.0) val = 1.0;
+        self.densitySlider.doubleValue = val;
+    }
+    if ((env = getenv("GOL_ZOOM")) != NULL) { val = atof(env); if (val > 0.0) self.cellPx = val; }
+    if ((env = getenv("GOL_RUN")) != NULL) self.running = atoi(env) != 0;
+    if (mode != nil && mode.length > 0) {
+        NSString *m = [mode lowercaseString];
+        if ([m isEqualToString:@"age"]) self.displayMode = DISPLAY_AGE;
+        else if ([m isEqualToString:@"trails"]) self.displayMode = DISPLAY_TRAILS;
+        else if ([m isEqualToString:@"heatmap"]) self.displayMode = DISPLAY_HEATMAP;
+    }
+    if (preset != nil && preset.length > 0) {
+        [self applyPreset:[preset UTF8String]];
+    } else {
+        [self randomize];
+    }
+}
+
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
     CFTimeInterval now;
     (void)note;
@@ -647,7 +687,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
         return;
     }
     [self setupUI];
-    [self randomize];
+    [self applyLaunchConfig];
 }
 
 - (BOOL)setupMetal {
