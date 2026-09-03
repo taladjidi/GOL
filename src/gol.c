@@ -241,3 +241,34 @@ void gol_resize_copy(const uint16_t *src, int srcW, int srcH,
         }
     }
 }
+
+void gol_copy_region(const uint16_t *src, int srcW, int srcH,
+                     uint16_t *dst, int dstW, int dstH, size_t dstPlaneCells,
+                     int srcX, int srcY) {
+    int x;
+    int y;
+    int sx;
+    int sy;
+
+    if (src == NULL || dst == NULL || dstW < 1 || dstH < 1 || dstPlaneCells < 1) {
+        return;
+    }
+    memset(dst, 0, dstPlaneCells * sizeof(uint16_t));
+    if (srcW < 1 || srcH < 1) {
+        return;
+    }
+    for (y = 0; y < dstH; y++) {
+        sy = y + srcY;
+        if (sy < 0 || sy >= srcH) {
+            continue;
+        }
+        for (x = 0; x < dstW; x++) {
+            sx = x + srcX;
+            if (sx < 0 || sx >= srcW) {
+                continue;
+            }
+            dst[(size_t)y * (size_t)dstW + (size_t)x] =
+                src[(size_t)sy * (size_t)srcW + (size_t)sx];
+        }
+    }
+}

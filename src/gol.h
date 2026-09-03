@@ -19,6 +19,9 @@ void gol_set_plane(uint16_t *cells, int w, int h, int x, int y, bool alive);
 void gol_step_cpu(const uint16_t *cur, uint16_t *next, int w, int h, GOLRules rules);
 void gol_resize_copy(const uint16_t *src, int srcW, int srcH,
                      uint16_t *dst, int dstW, int dstH, size_t dstPlaneCells);
+void gol_copy_region(const uint16_t *src, int srcW, int srcH,
+                     uint16_t *dst, int dstW, int dstH, size_t dstPlaneCells,
+                     int srcX, int srcY);
 void gol_apply_preset(uint16_t *cells, int w, int h, const char *preset);
 void gol_count_alive(const uint16_t *cells, int w, int h, int *alive, int *max_age);
 

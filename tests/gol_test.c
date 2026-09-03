@@ -430,6 +430,41 @@ static void test_range_rules(void) {
     printf("  PASS\n\n");
 }
 
+static void test_copy_region(void) {
+    uint16_t *src;
+    uint16_t *dst;
+    int x;
+    int y;
+    int alive;
+
+    printf("Test: Copy region with origin\n");
+    src = (uint16_t *)calloc(8 * 8, sizeof(uint16_t));
+    dst = (uint16_t *)calloc(256, sizeof(uint16_t));
+    assert(src != NULL);
+    assert(dst != NULL);
+
+    for (y = 0; y < 8; y++) {
+        for (x = 0; x < 8; x++) {
+            src[(size_t)y * 8 + (size_t)x] = (x == 2 && y == 3) ? (uint16_t)1u : (uint16_t)0u;
+        }
+    }
+
+    gol_copy_region(src, 8, 8, dst, 10, 10, 256, -1, -2);
+    assert(GolAlive(dst[(size_t)5 * 10 + (size_t)3]));
+    alive = count_alive(dst, 10, 10);
+    printf("  Alive after shifted copy: %d\n", alive);
+    assert(alive == 1);
+
+    gol_copy_region(src, 8, 8, dst, 4, 4, 256, 4, 4);
+    alive = count_alive(dst, 4, 4);
+    printf("  Alive after cropped copy: %d\n", alive);
+    assert(alive == 0);
+
+    free(src);
+    free(dst);
+    printf("  PASS\n\n");
+}
+
 int main(void) {
     printf("=== Game of Life Tests ===\n\n");
 
@@ -443,6 +478,7 @@ int main(void) {
     test_dynamic_rule_change();
     test_glider_recovery();
     test_range_rules();
+    test_copy_region();
 
     printf("All tests passed!\n");
     return 0;

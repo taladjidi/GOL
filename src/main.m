@@ -40,6 +40,8 @@ static const int VIEW_H = (int)(INITIAL_GRID_H * CELL_PX);
 static const int BAR_H = 120;
 static const int RENDER_SCALE = 1;
 static const int PLANE_COUNT = 3;
+static const NSUInteger MAX_PLANE_CELLS = 4000000;
+static const int MAX_TEXTURE_SIZE = 16384;
 static const uint32_t DISPLAY_AGE = 0u;
 static const uint32_t DISPLAY_TRAILS = 1u;
 static const uint32_t DISPLAY_HEATMAP = 2u;
@@ -348,6 +350,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 @property (nonatomic, assign) NSUInteger planeBytes;
 @property (nonatomic, assign) BOOL running;
 @property (nonatomic, assign) BOOL dirty;
+@property (nonatomic, assign) BOOL needsGridResize;
 @property (nonatomic, assign) uint32_t gen;
 @property (nonatomic, assign) CFTimeInterval fpsWindowStart;
 @property (nonatomic, assign) CFTimeInterval simLastTime;
@@ -414,6 +417,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 - (uint16_t *)currentCells;
 - (void)rebuildCellTexture;
 - (void)updateGridForPixelSize:(CGSize)pixelSize;
+- (void)requestGridResize;
 - (void)markDirty;
 - (void)tick;
 - (void)drawInMTKView:(MTKView *)view;
@@ -566,6 +570,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 @synthesize planeBytes = _planeBytes;
 @synthesize running = _running;
 @synthesize dirty = _dirty;
+@synthesize needsGridResize = _needsGridResize;
 @synthesize gen = _gen;
 @synthesize fpsWindowStart = _fpsWindowStart;
 @synthesize simLastTime = _simLastTime;
@@ -684,11 +689,19 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     screen = ScreenForWindow(self.mtkView.window);
     screenW = screen.frame.size.width;
     screenH = screen.frame.size.height;
-    self.maxGridW = FloorInt(screenW / CELL_PX) + 16;
-    self.maxGridH = FloorInt(GOL_MAX(0.0, screenH - (CGFloat)BAR_H) / CELL_PX) + 16;
+    self.maxGridW = FloorInt(screenW / MIN_CELL_PX) + 16;
+    self.maxGridH = FloorInt(GOL_MAX(0.0, screenH - (CGFloat)BAR_H) / MIN_CELL_PX) + 16;
     self.maxGridW = GOL_MAX(self.maxGridW, INITIAL_GRID_W);
     self.maxGridH = GOL_MAX(self.maxGridH, INITIAL_GRID_H);
+    self.maxGridW = GOL_MIN(self.maxGridW, MAX_TEXTURE_SIZE / (int)RENDER_SCALE);
+    self.maxGridH = GOL_MIN(self.maxGridH, MAX_TEXTURE_SIZE / (int)RENDER_SCALE);
     need = (NSUInteger)self.maxGridW * (NSUInteger)self.maxGridH;
+    if (need > MAX_PLANE_CELLS) {
+        double shrink = sqrt((double)MAX_PLANE_CELLS / (double)need);
+        self.maxGridW = GOL_MAX(8, FloorInt((double)self.maxGridW * shrink));
+        self.maxGridH = GOL_MAX(8, FloorInt((double)self.maxGridH * shrink));
+        need = (NSUInteger)self.maxGridW * (NSUInteger)self.maxGridH;
+    }
     self.planeCells = ((need + 7) / 8) * 8;
     self.planeBytes = self.planeCells * sizeof(uint16_t);
 
@@ -1077,7 +1090,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     self.viewOffsetX = (CGFloat)((bounds.size.width - (double)self.gridW * s) / 2.0);
     self.viewOffsetY = (CGFloat)((bounds.size.height - (double)self.gridH * s) / 2.0);
     [self updateZoomLabel];
-    [self markDirty];
+    [self requestGridResize];
 }
 
 - (void)updateZoomLabel {
@@ -1216,7 +1229,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     self.viewOffsetX = pt.x - (CGFloat)gx * self.cellPx;
     self.viewOffsetY = pt.y - (CGFloat)gy * self.cellPx;
     [self updateZoomLabel];
-    [self markDirty];
+    [self requestGridResize];
 }
 
 - (void)hoverAtEvent:(NSEvent *)e {
@@ -1370,7 +1383,98 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 }
 
 - (void)updateGridForPixelSize:(CGSize)pixelSize {
+    NSRect bounds;
+    double newWD;
+    double newHD;
+    int newW;
+    int newH;
+    double shrink;
+    int oldW;
+    int oldH;
+    int srcX;
+    int srcY;
+    uint16_t *base;
+    uint16_t *oldPlane;
+    uint16_t *tmp;
+    uint32_t p;
+    id<MTLCommandBuffer> inflight;
+
     (void)pixelSize;
+    self.needsGridResize = NO;
+    if (self.gridBuf == nil || self.mtkView == nil || self.cellPx < 0.01) {
+        return;
+    }
+    bounds = [self.mtkView bounds];
+    if (bounds.size.width < 1.0 || bounds.size.height < 1.0) {
+        return;
+    }
+
+    newWD = bounds.size.width / (double)self.cellPx;
+    newHD = bounds.size.height / (double)self.cellPx;
+    newW = FloorInt(newWD);
+    newH = FloorInt(newHD);
+    newW = GOL_MAX(8, GOL_MIN(newW, self.maxGridW));
+    newH = GOL_MAX(8, GOL_MIN(newH, self.maxGridH));
+
+    if ((NSUInteger)newW * (NSUInteger)newH > self.planeCells) {
+        shrink = sqrt((double)self.planeCells / ((double)newW * (double)newH));
+        newW = GOL_MAX(8, FloorInt((double)newW * shrink));
+        newH = GOL_MAX(8, FloorInt((double)newH * shrink));
+    }
+
+    if (newW == self.gridW && newH == self.gridH) {
+        return;
+    }
+
+    [self waitLast];
+    inflight = self.cb0;
+    if (inflight != nil) {
+        [inflight waitUntilCompleted];
+    }
+    inflight = self.cb1;
+    if (inflight != nil) {
+        [inflight waitUntilCompleted];
+    }
+    inflight = self.cb2;
+    if (inflight != nil) {
+        [inflight waitUntilCompleted];
+    }
+    [self clearCBRing];
+
+    oldW = self.gridW;
+    oldH = self.gridH;
+    srcX = FloorInt(-self.viewOffsetX / (double)self.cellPx);
+    srcY = FloorInt(-self.viewOffsetY / (double)self.cellPx);
+    base = (uint16_t *)[self.gridBuf contents];
+    oldPlane = base + (size_t)self.displayPlane * (size_t)self.planeCells;
+    tmp = (uint16_t *)calloc(self.planeCells, sizeof(uint16_t));
+    if (tmp == nil) {
+        return;
+    }
+
+    gol_copy_region(oldPlane, oldW, oldH, tmp, newW, newH, self.planeCells,
+                    srcX, srcY);
+    self.gridW = newW;
+    self.gridH = newH;
+    self.viewOffsetX = 0.0;
+    self.viewOffsetY = 0.0;
+
+    memcpy(base, tmp, (size_t)self.planeCells * sizeof(uint16_t));
+    for (p = 1; p < (uint32_t)PLANE_COUNT; p++) {
+        memset(base + (size_t)p * (size_t)self.planeCells, 0, self.planeBytes);
+    }
+    free(tmp);
+
+    self.frameIndex = 0;
+    self.displayPlane = 0;
+    [self rebuildCellTexture];
+    [self clearTrailNow];
+    [self markDirty];
+}
+
+- (void)requestGridResize {
+    self.needsGridResize = YES;
+    [self markDirty];
 }
 
 - (void)rebuildCellTexture {
@@ -1682,8 +1786,8 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 
 - (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {
     (void)view;
-    [self updateGridForPixelSize:size];
-    [self markDirty];
+    (void)size;
+    [self requestGridResize];
 }
 
 - (id<MTLCommandBuffer>)cbAt:(uint32_t)plane {
@@ -1764,6 +1868,10 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     if (self.mtkView == nil || self.queue == nil || self.renderPipeline == nil ||
         self.scalePipeline == nil || self.uniformsBuf == nil || self.gridBuf == nil) {
         return;
+    }
+
+    if (self.needsGridResize) {
+        [self updateGridForPixelSize:CGSizeZero];
     }
 
     if (!self.running && !self.dirty) {
