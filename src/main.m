@@ -87,6 +87,12 @@ static int LroundInt(double value) {
     return (int)floored;
 }
 
+static int CeilIntStable(double value) {
+    double shifted = value - 1e-6;
+    double ceiled = ceil(shifted);
+    return (int)ceiled;
+}
+
 static double ClampDouble(double value, double lo, double hi) {
     return GOL_MIN(GOL_MAX(value, lo), hi);
 }
@@ -348,6 +354,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 @property (nonatomic, assign) int maxGridH;
 @property (nonatomic, assign) NSUInteger planeCells;
 @property (nonatomic, assign) NSUInteger planeBytes;
+@property (nonatomic, assign) uint16_t *resizeTmp;
 @property (nonatomic, assign) BOOL running;
 @property (nonatomic, assign) BOOL dirty;
 @property (nonatomic, assign) BOOL needsGridResize;
@@ -413,6 +420,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 - (void)sliderChanged:(id)sender;
 - (void)paintAtEvent:(NSEvent *)e add:(BOOL)add;
 - (void)waitLast;
+- (void)waitAll;
 - (uint16_t *)planePointer:(uint32_t)plane;
 - (uint16_t *)currentCells;
 - (void)rebuildCellTexture;
@@ -568,6 +576,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 @synthesize maxGridH = _maxGridH;
 @synthesize planeCells = _planeCells;
 @synthesize planeBytes = _planeBytes;
+@synthesize resizeTmp = _resizeTmp;
 @synthesize running = _running;
 @synthesize dirty = _dirty;
 @synthesize needsGridResize = _needsGridResize;
@@ -704,6 +713,10 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     }
     self.planeCells = ((need + 7) / 8) * 8;
     self.planeBytes = self.planeCells * sizeof(uint16_t);
+    self.resizeTmp = (uint16_t *)malloc(self.planeBytes);
+    if (self.resizeTmp == nil) {
+        return NO;
+    }
 
     self.gridBuf = [self.device newBufferWithLength:(NSUInteger)PLANE_COUNT * self.planeBytes
                                             options:MTLResourceStorageModeShared];
@@ -854,8 +867,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     uint16_t *base;
     uint32_t p;
 
-    [self waitLast];
-    [self clearCBRing];
+    [self waitAll];
     self.frameIndex = 0;
     self.displayPlane = 0;
     self.gen = 0;
@@ -953,8 +965,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     if (density > 1.0) {
         density = 1.0;
     }
-    [self waitLast];
-    [self clearCBRing];
+    [self waitAll];
     self.frameIndex = 0;
     self.displayPlane = 0;
     self.gen = 0;
@@ -1003,8 +1014,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     uint16_t *base;
     uint32_t p;
 
-    [self waitLast];
-    [self clearCBRing];
+    [self waitAll];
     self.frameIndex = 0;
     self.displayPlane = 0;
     self.gen = 0;
@@ -1337,7 +1347,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     if (self.mtkView == nil) {
         return;
     }
-    [self waitLast];
+    [self waitAll];
     pt = [self topPointForEvent:e];
     if (![self gridCellAtPoint:pt col:&col row:&row]) {
         return;
@@ -1369,6 +1379,25 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     }
 }
 
+- (void)waitAll {
+    id<MTLCommandBuffer> inflight;
+
+    [self waitLast];
+    inflight = self.cb0;
+    if (inflight != nil) {
+        [inflight waitUntilCompleted];
+    }
+    inflight = self.cb1;
+    if (inflight != nil) {
+        [inflight waitUntilCompleted];
+    }
+    inflight = self.cb2;
+    if (inflight != nil) {
+        [inflight waitUntilCompleted];
+    }
+    [self clearCBRing];
+}
+
 - (uint16_t *)planePointer:(uint32_t)plane {
     uint16_t *base;
     if (self.gridBuf == nil) {
@@ -1395,13 +1424,12 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     int srcY;
     uint16_t *base;
     uint16_t *oldPlane;
-    uint16_t *tmp;
     uint32_t p;
-    id<MTLCommandBuffer> inflight;
 
     (void)pixelSize;
     self.needsGridResize = NO;
-    if (self.gridBuf == nil || self.mtkView == nil || self.cellPx < 0.01) {
+    if (self.gridBuf == nil || self.mtkView == nil || self.resizeTmp == nil ||
+        self.cellPx < 0.01) {
         return;
     }
     bounds = [self.mtkView bounds];
@@ -1411,8 +1439,8 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 
     newWD = bounds.size.width / (double)self.cellPx;
     newHD = bounds.size.height / (double)self.cellPx;
-    newW = FloorInt(newWD);
-    newH = FloorInt(newHD);
+    newW = CeilIntStable(newWD);
+    newH = CeilIntStable(newHD);
     newW = GOL_MAX(8, GOL_MIN(newW, self.maxGridW));
     newH = GOL_MAX(8, GOL_MIN(newH, self.maxGridH));
 
@@ -1426,20 +1454,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
         return;
     }
 
-    [self waitLast];
-    inflight = self.cb0;
-    if (inflight != nil) {
-        [inflight waitUntilCompleted];
-    }
-    inflight = self.cb1;
-    if (inflight != nil) {
-        [inflight waitUntilCompleted];
-    }
-    inflight = self.cb2;
-    if (inflight != nil) {
-        [inflight waitUntilCompleted];
-    }
-    [self clearCBRing];
+    [self waitAll];
 
     oldW = self.gridW;
     oldH = self.gridH;
@@ -1447,23 +1462,18 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     srcY = FloorInt(-self.viewOffsetY / (double)self.cellPx);
     base = (uint16_t *)[self.gridBuf contents];
     oldPlane = base + (size_t)self.displayPlane * (size_t)self.planeCells;
-    tmp = (uint16_t *)calloc(self.planeCells, sizeof(uint16_t));
-    if (tmp == nil) {
-        return;
-    }
 
-    gol_copy_region(oldPlane, oldW, oldH, tmp, newW, newH, self.planeCells,
-                    srcX, srcY);
+    gol_copy_region(oldPlane, oldW, oldH, self.resizeTmp, newW, newH,
+                    self.planeCells, srcX, srcY);
     self.gridW = newW;
     self.gridH = newH;
     self.viewOffsetX = 0.0;
     self.viewOffsetY = 0.0;
 
-    memcpy(base, tmp, (size_t)self.planeCells * sizeof(uint16_t));
+    memcpy(base, self.resizeTmp, (size_t)self.planeCells * sizeof(uint16_t));
     for (p = 1; p < (uint32_t)PLANE_COUNT; p++) {
         memset(base + (size_t)p * (size_t)self.planeCells, 0, self.planeBytes);
     }
-    free(tmp);
 
     self.frameIndex = 0;
     self.displayPlane = 0;
@@ -1488,8 +1498,8 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     }
     w = (NSUInteger)GOL_MAX(1, self.gridW) * (NSUInteger)RENDER_SCALE;
     h = (NSUInteger)GOL_MAX(1, self.gridH) * (NSUInteger)RENDER_SCALE;
-    w = GOL_MIN(w, (NSUInteger)16384);
-    h = GOL_MIN(h, (NSUInteger)16384);
+    w = GOL_MIN(w, (NSUInteger)MAX_TEXTURE_SIZE);
+    h = GOL_MIN(h, (NSUInteger)MAX_TEXTURE_SIZE);
     d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:self.mtkView.colorPixelFormat
                                                             width:w
                                                            height:h
@@ -2106,6 +2116,8 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
         [NSEvent removeMonitor:self.keyMonitor];
         self.keyMonitor = nil;
     }
+    free(self.resizeTmp);
+    self.resizeTmp = nil;
 }
 
 - (BOOL)windowShouldClose:(NSWindow *)sender {

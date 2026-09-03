@@ -78,6 +78,8 @@ static float3 Viridis(float t) {
 constant uint kDisplayTrails = 1u;
 constant uint kDisplayHeatmap = 2u;
 
+constexpr sampler s_linear(filter::linear, address::clamp_to_edge);
+
 static float3 Heat(float t) {
     float3 cool = mix(float3(0.05f, 0.15f, 0.65f), float3(0.95f, 0.25f, 0.10f), t);
     return mix(cool, float3(1.0f, 0.95f, 0.25f), smoothstep(0.65f, 1.0f, t));
@@ -125,14 +127,24 @@ static float3 Heat(float t) {
     }
     float2 f = fract(gridF);
     const float gap = 0.16f;
-    if (f.x < gap || f.x > 1.0f - gap || f.y < gap || f.y > 1.0f - gap) {
+    bool subpixel = (u.viewScaleX > 1.0f) || (u.viewScaleY > 1.0f);
+    if (!subpixel && (f.x < gap || f.x > 1.0f - gap || f.y < gap || f.y > 1.0f - gap)) {
         return bg;
     }
     int2 icell = int2(floor(gridF));
     icell = clamp(icell, int2(0, 0),
                   int2(static_cast<int>(u.gridW) - 1, static_cast<int>(u.gridH) - 1));
     uint2 tcoord = uint2(static_cast<uint>(icell.x), static_cast<uint>(icell.y));
-    float4 sample = (u.displayMode == kDisplayTrails) ? trail.read(tcoord, 0) : tex.read(tcoord, 0);
+    float4 sample;
+    if (subpixel) {
+        float2 tcoordF = (float2(icell) + 0.5f) /
+            float2(static_cast<float>(u.gridW), static_cast<float>(u.gridH));
+        sample = (u.displayMode == kDisplayTrails) ? trail.sample(s_linear, tcoordF) :
+                                                       tex.sample(s_linear, tcoordF);
+        float3 col = bg.rgb * (1.0f - sample.a) + sample.rgb;
+        return float4(col, 1.0f);
+    }
+    sample = (u.displayMode == kDisplayTrails) ? trail.read(tcoord, 0) : tex.read(tcoord, 0);
     if (sample.a < 0.5f) {
         return bg;
     }
