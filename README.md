@@ -1,5 +1,9 @@
 # GOL: Game of Life on the GPU
 
+<p align="center">
+  <img src="images/header.gif" width="600" alt="Trails mode: a random soup evolving with phosphor-style persistence">
+</p>
+
 A fast, interactive Conway's Game of Life for macOS, rendered entirely with
 Metal. The simulation runs in a GPU compute shader over a triple-buffered
 16-bit cell grid, with an interactive camera (pan/zoom), arbitrary B/S rules,
