@@ -211,52 +211,69 @@ constexpr sampler s_linear(filter::linear, address::clamp_to_edge);
 }
 
 // Advances one generation: reads cur plane, writes next plane.
-// One thread handles one cell.
+// One thread handles one cell. Out-of-range threads contribute zeros so every
+// lane reaches the simdgroup reduction; each simdgroup then adds its alive
+// count and max age into stats[0]/stats[1].
 [[kernel]] void gol_step(device const ushort *cur [[buffer(0)]],
                          device ushort *next [[buffer(1)]],
                          constant Uniforms &u [[buffer(2)]],
-                         uint2 gid [[thread_position_in_grid]]) {
-    if (gid.x >= u.gridW || gid.y >= u.gridH) return;
+                         device atomic_uint *stats [[buffer(3)]],
+                         uint2 gid [[thread_position_in_grid]],
+                         uint simdLane [[thread_index_in_simdgroup]]) {
+    bool inRange = (gid.x < u.gridW) && (gid.y < u.gridH);
+    uint outAlive = 0u;
+    uint outAge = 0u;
 
-    int w = static_cast<int>(u.gridW);
-    int h = static_cast<int>(u.gridH);
-    int x = static_cast<int>(gid.x);
-    int y = static_cast<int>(gid.y);
+    if (inRange) {
+        int w = static_cast<int>(u.gridW);
+        int h = static_cast<int>(u.gridH);
+        int x = static_cast<int>(gid.x);
+        int y = static_cast<int>(gid.y);
 
-    int xL = (x > 0) ? x - 1 : w - 1;
-    int xR = (x + 1 < w) ? x + 1 : 0;
-    int yU = (y > 0) ? y - 1 : h - 1;
-    int yD = (y + 1 < h) ? y + 1 : 0;
+        int xL = (x > 0) ? x - 1 : w - 1;
+        int xR = (x + 1 < w) ? x + 1 : 0;
+        int yU = (y > 0) ? y - 1 : h - 1;
+        int yD = (y + 1 < h) ? y + 1 : 0;
 
-    uint ux = static_cast<uint>(x);
-    uint rowU = static_cast<uint>(yU) * u.gridW;
-    uint rowC = static_cast<uint>(y) * u.gridW;
-    uint rowD = static_cast<uint>(yD) * u.gridW;
+        uint ux = static_cast<uint>(x);
+        uint rowU = static_cast<uint>(yU) * u.gridW;
+        uint rowC = static_cast<uint>(y) * u.gridW;
+        uint rowD = static_cast<uint>(yD) * u.gridW;
 
-    int n = static_cast<int>(cur[rowC + static_cast<uint>(xL)] & 1u)
-          + static_cast<int>(cur[rowC + ux] & 1u)
-          + static_cast<int>(cur[rowC + static_cast<uint>(xR)] & 1u)
-          + static_cast<int>(cur[rowU + static_cast<uint>(xL)] & 1u)
-          + static_cast<int>(cur[rowU + ux] & 1u)
-          + static_cast<int>(cur[rowU + static_cast<uint>(xR)] & 1u)
-          + static_cast<int>(cur[rowD + static_cast<uint>(xL)] & 1u)
-          + static_cast<int>(cur[rowD + ux] & 1u)
-          + static_cast<int>(cur[rowD + static_cast<uint>(xR)] & 1u);
-    n -= static_cast<int>(cur[rowC + ux] & 1u);
+        int n = static_cast<int>(cur[rowC + static_cast<uint>(xL)] & 1u)
+              + static_cast<int>(cur[rowC + ux] & 1u)
+              + static_cast<int>(cur[rowC + static_cast<uint>(xR)] & 1u)
+              + static_cast<int>(cur[rowU + static_cast<uint>(xL)] & 1u)
+              + static_cast<int>(cur[rowU + ux] & 1u)
+              + static_cast<int>(cur[rowU + static_cast<uint>(xR)] & 1u)
+              + static_cast<int>(cur[rowD + static_cast<uint>(xL)] & 1u)
+              + static_cast<int>(cur[rowD + ux] & 1u)
+              + static_cast<int>(cur[rowD + static_cast<uint>(xR)] & 1u);
+        n -= static_cast<int>(cur[rowC + ux] & 1u);
 
-    uint idx = rowC + ux;
-    ushort v = cur[idx];
-    bool alive = (v & 1u) != 0u;
-    uint age = (v >> 1) & 0x7FFFu;
+        uint idx = rowC + ux;
+        ushort v = cur[idx];
+        bool alive = (v & 1u) != 0u;
+        uint age = (v >> 1) & 0x7FFFu;
 
-    uint out = 0u;
-    uchar birthBit = static_cast<uchar>((u.birth >> n) & 1u);
-    uchar survBit = static_cast<uchar>((u.survival >> n) & 1u);
-    if (birthBit || (alive && survBit)) {
-        uint newAge = alive ? (age >= 32767u ? 32767u : age + 1u) : 1u;
-        out = 1u | (newAge << 1);
+        uint out = 0u;
+        uchar birthBit = static_cast<uchar>((u.birth >> n) & 1u);
+        uchar survBit = static_cast<uchar>((u.survival >> n) & 1u);
+        if (birthBit || (alive && survBit)) {
+            uint newAge = alive ? (age >= 32767u ? 32767u : age + 1u) : 1u;
+            out = 1u | (newAge << 1);
+        }
+        next[idx] = static_cast<ushort>(out);
+        outAlive = out & 1u;
+        outAge = (out >> 1) & 0x7FFFu;
     }
-    next[idx] = static_cast<ushort>(out);
+
+    uint groupAlive = simd_sum(outAlive);
+    uint groupMaxAge = simd_max(outAge);
+    if (simdLane == 0u) {
+        atomic_fetch_add_explicit(&stats[0], groupAlive, memory_order_relaxed);
+        atomic_fetch_max_explicit(&stats[1], groupMaxAge, memory_order_relaxed);
+    }
 }
 
 // Fades the persistent trail texture and adds the current cell color.

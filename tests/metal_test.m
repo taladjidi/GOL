@@ -69,8 +69,8 @@ int main(int argc, char *argv[]) {
             { (1u << 2) | (1u << 3) | (1u << 4), (1u << 1) | (1u << 2) | (1u << 3) },
             { 0u, (1u << 1) }
         };
-        int widths[] = { 16, 32, 48 };
-        int heights[] = { 16, 32, 31 };
+        int widths[] = { 16, 32, 48, 7 };
+        int heights[] = { 16, 32, 31, 5 };
         double densities[] = { 0.1, 0.4, 0.8 };
         size_t rule_count;
         size_t grid_count;
@@ -134,6 +134,7 @@ int main(int argc, char *argv[]) {
                     id<MTLBuffer> curBuf;
                     id<MTLBuffer> nextBuf;
                     id<MTLBuffer> uniBuf;
+                    id<MTLBuffer> statsBuf;
                     uint16_t *cpuCur;
                     uint16_t *cpuNext;
                     RefGrid ref;
@@ -148,7 +149,8 @@ int main(int argc, char *argv[]) {
                     curBuf = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
                     nextBuf = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
                     uniBuf = [device newBufferWithLength:sizeof(Uniforms) options:MTLResourceStorageModeShared];
-                    assert(curBuf != nil && nextBuf != nil && uniBuf != nil);
+                    statsBuf = [device newBufferWithLength:16 options:MTLResourceStorageModeShared];
+                    assert(curBuf != nil && nextBuf != nil && uniBuf != nil && statsBuf != nil);
 
                     cpuCur = (uint16_t *)calloc(n, sizeof(uint16_t));
                     cpuNext = (uint16_t *)calloc(n, sizeof(uint16_t));
@@ -181,6 +183,9 @@ int main(int argc, char *argv[]) {
                         size_t mismatches;
                         int refAlive;
                         int metalAlive;
+                        int cpuAlive;
+                        int cpuMaxAge;
+                        uint32_t *stats;
                         id<MTLBuffer> tmpBuf;
                         uint16_t *tmpCpu;
 
@@ -189,9 +194,11 @@ int main(int argc, char *argv[]) {
                         enc = [cb computeCommandEncoder];
                         assert(enc != nil);
                         [enc setComputePipelineState:pipeline];
+                        memset([statsBuf contents], 0, 16);
                         [enc setBuffer:curBuf offset:0 atIndex:0];
                         [enc setBuffer:nextBuf offset:0 atIndex:1];
                         [enc setBuffer:uniBuf offset:0 atIndex:2];
+                        [enc setBuffer:statsBuf offset:0 atIndex:3];
                         gx = ((NSUInteger)w + tx - 1) / tx;
                         gy = ((NSUInteger)h + ty - 1) / ty;
                         [enc dispatchThreadgroups:MakeSize((int)gx, (int)gy, 1)
@@ -229,6 +236,17 @@ int main(int argc, char *argv[]) {
                                 mismatches++;
                             }
                         }
+
+                        gol_count_alive(cpuNext, w, h, &cpuAlive, &cpuMaxAge);
+                        stats = (uint32_t *)[statsBuf contents];
+                        if (stats[0] != (uint32_t)cpuAlive || stats[1] != (uint32_t)cpuMaxAge) {
+                            if (mismatches < 8) {
+                                printf("  STATS MISMATCH rule=%zu grid=%dx%d density=%.2f step=%d gpu=%u/%u cpu=%d/%d\n",
+                                       ri, w, h, densities[di], step, stats[0], stats[1], cpuAlive, cpuMaxAge);
+                            }
+                            mismatches++;
+                        }
+
                         if (mismatches > 0) {
                             fprintf(stderr, "Metal test failed with %zu mismatches\n", mismatches);
                             return 1;

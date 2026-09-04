@@ -37,7 +37,8 @@ effect, and three display modes.
 - **Glow / bloom**: a subtle additive glow around live cells, toggleable from
   the toolbar or with `G`.
 - **Live stats**: generation, population (with a live trend sparkline), max
-  age, and FPS.
+  age, and FPS. Population and max age are computed on the GPU as a reduction
+  inside the step kernel, so stats cost nothing at high generation rates.
 
 ## Screenshots
 

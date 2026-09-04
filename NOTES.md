@@ -48,9 +48,6 @@ would help.
 
 ## Deferred — code quality (correctness/robustness, not features)
 
-- **GPU population count.** `gol_count_alive` runs on the CPU every frame
-  (`main.m:2372`) over the whole plane — a full readback-free CPU loop over up to
-  ~50M cells. Should be a compute reduction, or at least throttled / sampled.
 - **Better RNG.** `gol_randomize` uses `srand(time(NULL))` + `rand()`
   (`gol.c:32`). Fine for now; a proper PRNG (e.g. splitmix64) would be more
   reproducible and higher quality.

@@ -87,6 +87,15 @@ typedef struct {
     float glow;
 } Uniforms;
 
+// Per-plane statistics written by the gol_step kernel (buffer(3)): alive count
+// and max age of the plane just written. One 16-byte slot per plane.
+typedef struct {
+    uint32_t alive;
+    uint32_t maxAge;
+    uint32_t pad0;
+    uint32_t pad1;
+} GOLStats;
+
 static MTLSize MakeSize(int w, int h, int d) {
     MTLSize s;
     s.width = (NSUInteger)w;
@@ -437,6 +446,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
 @property (nonatomic, strong) id<MTLTexture> trailTex;
 @property (nonatomic, strong) id<MTLBuffer> gridBuf;
 @property (nonatomic, strong) id<MTLBuffer> uniformsBuf;
+@property (nonatomic, strong) id<MTLBuffer> statsBuf;
 @property (nonatomic, strong) id<MTLCommandBuffer> cb0;
 @property (nonatomic, strong) id<MTLCommandBuffer> cb1;
 @property (nonatomic, strong) id<MTLCommandBuffer> cb2;
@@ -455,6 +465,9 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
 @property (nonatomic, assign) BOOL dirty;
 @property (nonatomic, assign) BOOL needsGridResize;
 @property (nonatomic, assign) uint32_t gen;
+@property (nonatomic, assign) uint32_t popAlive;
+@property (nonatomic, assign) uint32_t popMaxAge;
+@property (nonatomic, assign) uint32_t lastStatsGen;
 @property (nonatomic, assign) CFTimeInterval fpsWindowStart;
 @property (nonatomic, assign) CFTimeInterval simLastTime;
 @property (nonatomic, assign) uint32_t fpsFrames;
@@ -668,6 +681,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
 @synthesize trailTex = _trailTex;
 @synthesize gridBuf = _gridBuf;
 @synthesize uniformsBuf = _uniformsBuf;
+@synthesize statsBuf = _statsBuf;
 @synthesize cb0 = _cb0;
 @synthesize cb1 = _cb1;
 @synthesize cb2 = _cb2;
@@ -686,6 +700,9 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
 @synthesize dirty = _dirty;
 @synthesize needsGridResize = _needsGridResize;
 @synthesize gen = _gen;
+@synthesize popAlive = _popAlive;
+@synthesize popMaxAge = _popMaxAge;
+@synthesize lastStatsGen = _lastStatsGen;
 @synthesize fpsWindowStart = _fpsWindowStart;
 @synthesize simLastTime = _simLastTime;
 @synthesize fpsFrames = _fpsFrames;
@@ -800,6 +817,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     self.gridW = INITIAL_GRID_W;
     self.gridH = INITIAL_GRID_H;
     self.gen = 0;
+    self.lastStatsGen = 0;
     self.dirty = NO;
     self.running = NO;
     self.fpsWindowStart = now;
@@ -923,6 +941,12 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     if (self.uniformsBuf == nil) {
         return NO;
     }
+    self.statsBuf = [self.device newBufferWithLength:(NSUInteger)PLANE_COUNT * sizeof(GOLStats)
+                                            options:MTLResourceStorageModeShared];
+    if (self.statsBuf == nil) {
+        return NO;
+    }
+    memset([self.statsBuf contents], 0, (size_t)PLANE_COUNT * sizeof(GOLStats));
 
     self.cb0 = nil;
     self.cb1 = nil;
@@ -1036,12 +1060,15 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     uint16_t *cells;
     uint16_t *base;
     uint32_t p;
+    int alive;
+    int maxAge;
 
     [self waitAll];
     self.frameIndex = 0;
     self.displayPlane = 0;
     self.completedPlane = 0;
     self.gen = 0;
+    self.lastStatsGen = 0;
     cells = [self currentCells];
     if (cells == nil) {
         return;
@@ -1057,6 +1084,10 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     if (self.popSpark != nil) {
         [self.popSpark resetBuffer];
     }
+    alive = 0;
+    maxAge = 0;
+    gol_count_alive(cells, self.gridW, self.gridH, &alive, &maxAge);
+    [self setPopulation:(uint32_t)alive maxAge:(uint32_t)maxAge forGeneration:self.gen];
     [self markDirty];
 }
 
@@ -1112,6 +1143,8 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     uint16_t *base;
     uint32_t p;
     int pct;
+    int alive;
+    int maxAge;
 
     density = self.densitySlider ? self.densitySlider.doubleValue : 0.2;
     if (density < 0.0) {
@@ -1125,6 +1158,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     self.displayPlane = 0;
     self.completedPlane = 0;
     self.gen = 0;
+    self.lastStatsGen = 0;
     self.genAccum = 0;
     [self clearTrailNow];
     cells = [self currentCells];
@@ -1146,6 +1180,10 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     if (self.popSpark != nil) {
         [self.popSpark resetBuffer];
     }
+    alive = 0;
+    maxAge = 0;
+    gol_count_alive(cells, self.gridW, self.gridH, &alive, &maxAge);
+    [self setPopulation:(uint32_t)alive maxAge:(uint32_t)maxAge forGeneration:self.gen];
     [self markDirty];
 }
 
@@ -1177,12 +1215,15 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     uint16_t *cells;
     uint16_t *base;
     uint32_t p;
+    int alive;
+    int maxAge;
 
     [self waitAll];
     self.frameIndex = 0;
     self.displayPlane = 0;
     self.completedPlane = 0;
     self.gen = 0;
+    self.lastStatsGen = 0;
     self.genAccum = 0;
     [self clearTrailNow];
     cells = [self currentCells];
@@ -1200,7 +1241,31 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     if (self.popSpark != nil) {
         [self.popSpark resetBuffer];
     }
+    alive = 0;
+    maxAge = 0;
+    gol_count_alive(cells, self.gridW, self.gridH, &alive, &maxAge);
+    [self setPopulation:(uint32_t)alive maxAge:(uint32_t)maxAge forGeneration:self.gen];
     [self markDirty];
+}
+
+// Applies a population/max-age result. Results arrive async from the GPU step
+// readback, so anything older than the last applied generation is dropped.
+- (void)setPopulation:(uint32_t)alive maxAge:(uint32_t)maxAge forGeneration:(uint32_t)gen {
+    if (gen < self.lastStatsGen) {
+        return;
+    }
+    self.lastStatsGen = gen;
+    self.popAlive = alive;
+    self.popMaxAge = maxAge;
+    if (self.popLabel != nil) {
+        self.popLabel.stringValue = [NSString stringWithFormat:@"Pop: %u", alive];
+    }
+    if (self.maxAgeLabel != nil) {
+        self.maxAgeLabel.stringValue = [NSString stringWithFormat:@"MaxAge: %u", maxAge];
+    }
+    if (self.popSpark != nil) {
+        [self.popSpark pushValue:(int)alive];
+    }
 }
 
 - (void)clearTrailNow {
@@ -1622,6 +1687,8 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     int cx;
     int cy;
     uint16_t *cells;
+    int alive;
+    int maxAge;
 
     if (self.mtkView == nil) {
         return;
@@ -1644,6 +1711,10 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
             }
         }
     }
+    alive = 0;
+    maxAge = 0;
+    gol_count_alive(cells, self.gridW, self.gridH, &alive, &maxAge);
+    [self setPopulation:(uint32_t)alive maxAge:(uint32_t)maxAge forGeneration:self.gen];
     [self markDirty];
     [self updateHoverAtPoint:pt];
 }
@@ -1704,6 +1775,9 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     uint16_t *base;
     uint16_t *oldPlane;
     uint32_t p;
+    uint16_t *cells;
+    int alive;
+    int maxAge;
 
     (void)pixelSize;
     self.needsGridResize = NO;
@@ -1759,6 +1833,13 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     self.completedPlane = 0;
     [self rebuildCellTexture];
     [self clearTrailNow];
+    cells = [self currentCells];
+    if (cells != nil) {
+        alive = 0;
+        maxAge = 0;
+        gol_count_alive(cells, self.gridW, self.gridH, &alive, &maxAge);
+        [self setPopulation:(uint32_t)alive maxAge:(uint32_t)maxAge forGeneration:self.gen];
+    }
     [self markDirty];
 }
 
@@ -2194,6 +2275,9 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     uint16_t *cells;
     int alive;
     int maxAge;
+    GOLStats *s;
+    uint32_t stepGen;
+    __weak App *weakSelf;
     CFTimeInterval fpsDt;
     int fps;
 
@@ -2281,7 +2365,17 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
                           oldest.status == MTLCommandBufferStatusCompleted ||
                           oldest.status == MTLCommandBufferStatusError;
             if (oldestDone) {
+                // The step also writes the stats slot of the write plane, so
+                // that plane's last command buffer must be done too.
                 writePlane = (curPlane + 1) % (uint32_t)PLANE_COUNT;
+                oldest = [self cbAt:writePlane];
+                oldestDone = (oldest == nil) ||
+                              oldest.status == MTLCommandBufferStatusCompleted ||
+                              oldest.status == MTLCommandBufferStatusError;
+            }
+            if (oldestDone) {
+                s = (GOLStats *)[self.statsBuf contents];
+                memset(&s[writePlane], 0, sizeof(GOLStats));
                 curByte = (NSUInteger)curPlane * self.planeBytes;
                 writeByte = (NSUInteger)writePlane * self.planeBytes;
                 tgW = 16;
@@ -2293,6 +2387,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
                 [enc setBuffer:self.gridBuf offset:curByte atIndex:0];
                 [enc setBuffer:self.gridBuf offset:writeByte atIndex:1];
                 [enc setBuffer:self.uniformsBuf offset:0 atIndex:2];
+                [enc setBuffer:self.statsBuf offset:writePlane * sizeof(GOLStats) atIndex:3];
                 [enc dispatchThreadgroups:MakeSize((int)gx, (int)gy, 1)
                   threadsPerThreadgroup:MakeSize((int)tgW, (int)tgH, 1)];
                 [enc endEncoding];
@@ -2312,6 +2407,14 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
                 self.displayPlane = writePlane;
                 self.completedPlane = writePlane;
                 willStep = YES;
+                cells = [self planePointer:writePlane];
+                alive = 0;
+                maxAge = 0;
+                if (cells != nil) {
+                    gol_count_alive(cells, self.gridW, self.gridH, &alive, &maxAge);
+                }
+                [self setPopulation:(uint32_t)alive maxAge:(uint32_t)maxAge
+                   forGeneration:self.gen + 1u];
             }
         }
     }
@@ -2382,11 +2485,38 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     [rend endEncoding];
 
     [cb presentDrawable:drawable];
-    [cb addCompletedHandler:^(id<MTLCommandBuffer> completedBuffer) {
-        if (completedBuffer.error != nil) {
-            NSLog(@"command buffer error: %@", completedBuffer.error);
-        }
-    }];
+    if (willStep && self.stepPipeline != nil) {
+        // The step kernel wrote the stats slot of writePlane; read it back once
+        // the buffer completes and apply it on the main queue.
+        stepGen = self.gen + 1u;
+        weakSelf = self;
+        [cb addCompletedHandler:^(id<MTLCommandBuffer> completedBuffer) {
+            App *strongSelf;
+            GOLStats *stats;
+            uint32_t a;
+            uint32_t m;
+            if (completedBuffer.error != nil) {
+                NSLog(@"command buffer error: %@", completedBuffer.error);
+                return;
+            }
+            strongSelf = weakSelf;
+            if (strongSelf == nil) {
+                return;
+            }
+            stats = (GOLStats *)[strongSelf.statsBuf contents];
+            a = stats[writePlane].alive;
+            m = stats[writePlane].maxAge;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [strongSelf setPopulation:a maxAge:m forGeneration:stepGen];
+            });
+        }];
+    } else {
+        [cb addCompletedHandler:^(id<MTLCommandBuffer> completedBuffer) {
+            if (completedBuffer.error != nil) {
+                NSLog(@"command buffer error: %@", completedBuffer.error);
+            }
+        }];
+    }
     [cb commit];
 
     if (willStep) {
@@ -2400,24 +2530,6 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
 
     if (self.genLabel != nil) {
         self.genLabel.stringValue = [NSString stringWithFormat:@"Gen %u", self.gen];
-    }
-
-    if (willStep) {
-        cells = [self planePointer:self.completedPlane];
-        alive = 0;
-        maxAge = 0;
-        if (cells != nil) {
-            gol_count_alive(cells, self.gridW, self.gridH, &alive, &maxAge);
-        }
-        if (self.popLabel != nil) {
-            self.popLabel.stringValue = [NSString stringWithFormat:@"Pop: %d", alive];
-        }
-        if (self.maxAgeLabel != nil) {
-            self.maxAgeLabel.stringValue = [NSString stringWithFormat:@"MaxAge: %d", maxAge];
-        }
-        if (self.popSpark != nil) {
-            [self.popSpark pushValue:alive];
-        }
     }
 
     self.fpsFrames = self.fpsFrames + 1u;
