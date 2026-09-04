@@ -729,31 +729,42 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     NSString *mode = nil;
     NSString *preset = nil;
     NSString *palette = nil;
+    double density = 0.0;
+    double zoom = 0.0;
+    int run = 0;
+    int densitySet = 0;
+    int zoomSet = 0;
+    int runSet = 0;
     const char *env;
     double val;
     NSUInteger i;
     args = [[NSProcessInfo processInfo] arguments];
     for (i = 1; i < args.count; i++) {
         NSString *a = args[i];
-        if ([a hasPrefix:@"-"]) continue;
         if (i + 1 < args.count) {
             NSString *n = args[i + 1];
             if ([a caseInsensitiveCompare:@"--mode"] == NSOrderedSame) { mode = n; i++; }
             else if ([a caseInsensitiveCompare:@"--preset"] == NSOrderedSame) { preset = n; i++; }
             else if ([a caseInsensitiveCompare:@"--palette"] == NSOrderedSame) { palette = n; i++; }
+            else if ([a caseInsensitiveCompare:@"--density"] == NSOrderedSame) { density = atof(n.UTF8String); densitySet = 1; i++; }
+            else if ([a caseInsensitiveCompare:@"--zoom"] == NSOrderedSame) { zoom = atof(n.UTF8String); zoomSet = 1; i++; }
+            else if ([a caseInsensitiveCompare:@"--run"] == NSOrderedSame) { run = atoi(n.UTF8String); runSet = 1; i++; }
         }
     }
     if (mode == nil && (env = getenv("GOL_MODE")) != NULL) mode = [NSString stringWithUTF8String:env];
     if (preset == nil && (env = getenv("GOL_PRESET")) != NULL) preset = [NSString stringWithUTF8String:env];
     if (palette == nil && (env = getenv("GOL_PALETTE")) != NULL) palette = [NSString stringWithUTF8String:env];
-    if ((env = getenv("GOL_DENSITY")) != NULL && self.densitySlider != nil) {
-        val = atof(env);
+    if (!densitySet && (env = getenv("GOL_DENSITY")) != NULL) { density = atof(env); densitySet = 1; }
+    if (!zoomSet && (env = getenv("GOL_ZOOM")) != NULL) { zoom = atof(env); zoomSet = 1; }
+    if (!runSet && (env = getenv("GOL_RUN")) != NULL) { run = atoi(env); runSet = 1; }
+    if (densitySet && self.densitySlider != nil) {
+        val = density;
         if (val < 0.0) val = 0.0;
         if (val > 1.0) val = 1.0;
         self.densitySlider.doubleValue = val;
     }
-    if ((env = getenv("GOL_ZOOM")) != NULL) { val = atof(env); if (val > 0.0) self.cellPx = val; }
-    if ((env = getenv("GOL_RUN")) != NULL) self.running = atoi(env) != 0;
+    if (zoomSet && zoom > 0.0) { self.cellPx = zoom; }
+    if (runSet) { self.running = run != 0; }
     if (mode != nil && mode.length > 0) {
         NSString *m = [mode lowercaseString];
         if ([m isEqualToString:@"age"]) self.displayMode = DISPLAY_AGE;

@@ -70,6 +70,26 @@ make clean     # remove bin/ and build/
 The whole project compiles with `-Weverything` (C, Objective-C, and Metal)
 and ships warning-free.
 
+## Launch options
+
+The app accepts command-line flags. Each flag has an environment-variable
+equivalent, and a flag takes precedence over the corresponding variable:
+
+| Flag | Env var | Meaning |
+| --- | --- | --- |
+| `--mode age\|trails\|heatmap` | `GOL_MODE` | Initial display mode (default Age) |
+| `--preset NAME` | `GOL_PRESET` | Start with a preset instead of a random soup: `glider`, `blinker`, `block`, `beacon`, `toad`, `pentadecathlon`, `lwss`, `r-pentomino`, `heptomino`, `pulsar`, `acorn` |
+| `--palette viridis\|inferno\|plasma\|turbo` | `GOL_PALETTE` | Initial color palette (default Viridis) |
+| `--density 0.0-1.0` | `GOL_DENSITY` | Fill probability of the initial soup (default 0.2) |
+| `--zoom PX` | `GOL_ZOOM` | Starting pixels per cell (default 6) |
+| `--run 0\|1` | `GOL_RUN` | Start running (1) or paused (0, the default) |
+
+Example:
+
+```sh
+./bin/gol --mode trails --preset acorn --run 1
+```
+
 ## Controls
 
 ### Mouse (on the canvas)
