@@ -2313,7 +2313,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
         [cenc endEncoding];
     }
 
-    if (self.displayMode == DISPLAY_TRAILS && self.trailStepPipeline != nil &&
+    if (willStep && self.displayMode == DISPLAY_TRAILS && self.trailStepPipeline != nil &&
         self.trailTex != nil && self.cellTex != nil &&
         self.trailTex.width > 0 && self.trailTex.height > 0) {
         tgW = 16;
