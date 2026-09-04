@@ -1541,6 +1541,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
 
 - (BOOL)handleKey:(NSEvent *)event {
     NSEventModifierFlags flags;
+    NSString *ch;
 
     flags = event.modifierFlags;
     if ((flags & (NSEventModifierFlagCommand | NSEventModifierFlagControl)) != 0) {
@@ -1549,26 +1550,31 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     if ([self.window firstResponder] != self.mtkView) {
         return NO;
     }
-    switch (event.keyCode) {
-        case 49:
-            [self goPause:nil];
-            return YES;
-        case 15:
-            [self clear];
-            return YES;
-        case 6:
-            [self randomize];
-            return YES;
-        case 5:
-            [self glowToggle:nil];
-            return YES;
-        case 3:
-        case 29:
-            [self fitView];
-            return YES;
-        default:
-            return NO;
+    ch = [event.charactersIgnoringModifiers lowercaseString];
+    if (ch == nil || ch.length == 0) {
+        return NO;
     }
+    if ([ch isEqualToString:@" "]) {
+        [self goPause:nil];
+        return YES;
+    }
+    if ([ch isEqualToString:@"r"]) {
+        [self clear];
+        return YES;
+    }
+    if ([ch isEqualToString:@"z"]) {
+        [self randomize];
+        return YES;
+    }
+    if ([ch isEqualToString:@"g"]) {
+        [self glowToggle:nil];
+        return YES;
+    }
+    if ([ch isEqualToString:@"f"] || [ch isEqualToString:@"0"]) {
+        [self fitView];
+        return YES;
+    }
+    return NO;
 }
 
 - (void)sliderChanged:(id)sender {
