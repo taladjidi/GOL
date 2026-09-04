@@ -787,6 +787,9 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
 
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
     CFTimeInterval now;
+    NSMenu *mainMenu;
+    NSMenuItem *appItem;
+    NSMenu *appMenu;
     (void)note;
     now = CFAbsoluteTimeGetCurrent();
     self.frameIndex = 0;
@@ -819,6 +822,13 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     }
     [self setupUI];
     [self applyLaunchConfig];
+
+    mainMenu = [NSMenu new];
+    appItem = [mainMenu addItemWithTitle:@"" action:nil keyEquivalent:@""];
+    appMenu = [NSMenu new];
+    [appMenu addItemWithTitle:@"Quit GOL" action:@selector(terminate:) keyEquivalent:@"q"];
+    appItem.submenu = appMenu;
+    NSApp.mainMenu = mainMenu;
 }
 
 - (BOOL)setupMetal {
