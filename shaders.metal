@@ -9,11 +9,9 @@ struct Uniforms {
     uint gridH;
     uint curOffset;
     uint pad;
-    // Rule bitmasks
-    uchar birth;
-    uchar survival;
-    uchar pad2;
-    uchar pad3;
+    // Rule bitmasks (bit n set if the rule acts on n neighbors, n in 0..8)
+    ushort birth;
+    ushort survival;
     float viewScaleX;
     float viewScaleY;
     float viewOffsetX;
@@ -21,7 +19,8 @@ struct Uniforms {
     float viewWidth;
     float viewHeight;
     uint displayMode;
-    uint pad4;
+    uint palette;
+    float glow;
 };
 
 struct VSOut {
@@ -75,15 +74,61 @@ static float3 Viridis(float t) {
     return mix(kViridis[i0], kViridis[i1], f);
 }
 
+// Piecewise-linear blend through four color stops (t in [0,1]).
+static float3 StopMix(float t, float3 c0, float3 c1, float3 c2, float3 c3) {
+    t = clamp(t, 0.0f, 1.0f);
+    float x = t * 3.0f;
+    if (x < 1.0f) {
+        return mix(c0, c1, x);
+    }
+    if (x < 2.0f) {
+        return mix(c1, c2, x - 1.0f);
+    }
+    return mix(c2, c3, x - 2.0f);
+}
+
+static float3 Inferno(float t) {
+    return StopMix(t,
+        float3(0.019f, 0.025f, 0.078f),
+        float3(0.510f, 0.024f, 0.490f),
+        float3(0.938f, 0.361f, 0.267f),
+        float3(0.988f, 0.992f, 0.667f));
+}
+
+static float3 Plasma(float t) {
+    return StopMix(t,
+        float3(0.246f, 0.012f, 0.518f),
+        float3(0.647f, 0.120f, 0.737f),
+        float3(0.930f, 0.427f, 0.396f),
+        float3(0.961f, 0.968f, 0.412f));
+}
+
+static float3 Turbo(float t) {
+    return StopMix(t,
+        float3(0.486f, 0.000f, 1.000f),
+        float3(0.000f, 0.467f, 0.894f),
+        float3(0.173f, 0.894f, 0.361f),
+        float3(1.000f, 0.945f, 0.000f));
+}
+
+// Selects the active colormap by palette index.
+static float3 Ramp(float t, uint palette) {
+    if (palette == 1u) {
+        return Inferno(t);
+    }
+    if (palette == 2u) {
+        return Plasma(t);
+    }
+    if (palette == 3u) {
+        return Turbo(t);
+    }
+    return Viridis(t);
+}
+
 constant uint kDisplayTrails = 1u;
 constant uint kDisplayHeatmap = 2u;
 
 constexpr sampler s_linear(filter::linear, address::clamp_to_edge);
-
-static float3 Heat(float t) {
-    float3 cool = mix(float3(0.05f, 0.15f, 0.65f), float3(0.95f, 0.25f, 0.10f), t);
-    return mix(cool, float3(1.0f, 0.95f, 0.25f), smoothstep(0.65f, 1.0f, t));
-}
 
 // Renders the active grid plane into a small cell texture.
 // Cell packing: bit 0 = alive, bits 1..15 = age.
@@ -103,12 +148,16 @@ static float3 Heat(float t) {
     if ((v & 1u) == 0u) {
         return float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
-    float age = static_cast<float>((v >> 1) & 0x7FFFu) / 100.0f;
-    float t = 1.0f - min(age, 1.0f);
+    float age = static_cast<float>((v >> 1) & 0x7FFFu);
+    float3 col;
     if (u.displayMode == kDisplayHeatmap) {
-        return float4(Heat(t), 1.0f);
+        // Heat builds up and saturates quickly.
+        col = Ramp(min(age / 30.0f, 1.0f), u.palette);
+    } else {
+        // Age: newest cells at the bright end, dimming as they age.
+        col = Ramp(1.0f - min(age / 100.0f, 1.0f), u.palette);
     }
-    return float4(Viridis(t), 1.0f);
+    return float4(col, 1.0f);
 }
 
 // Scales the small cell texture to the drawable and draws cell gaps.
@@ -126,29 +175,39 @@ static float3 Heat(float t) {
         return bg;
     }
     float2 f = fract(gridF);
-    const float gap = 0.16f;
     bool subpixel = (u.viewScaleX > 1.0f) || (u.viewScaleY > 1.0f);
-    if (!subpixel && (f.x < gap || f.x > 1.0f - gap || f.y < gap || f.y > 1.0f - gap)) {
-        return bg;
-    }
     int2 icell = int2(floor(gridF));
     icell = clamp(icell, int2(0, 0),
                   int2(static_cast<int>(u.gridW) - 1, static_cast<int>(u.gridH) - 1));
     uint2 tcoord = uint2(static_cast<uint>(icell.x), static_cast<uint>(icell.y));
     float4 sample;
     if (subpixel) {
+        // Multiple cells per pixel: linear filtering keeps shrunken patterns smooth.
         float2 tcoordF = (float2(icell) + 0.5f) /
             float2(static_cast<float>(u.gridW), static_cast<float>(u.gridH));
         sample = (u.displayMode == kDisplayTrails) ? trail.sample(s_linear, tcoordF) :
-                                                       tex.sample(s_linear, tcoordF);
+                                                         tex.sample(s_linear, tcoordF);
         float3 col = bg.rgb * (1.0f - sample.a) + sample.rgb;
+        col += sample.rgb * u.glow * 0.3f;
         return float4(col, 1.0f);
     }
     sample = (u.displayMode == kDisplayTrails) ? trail.read(tcoord, 0) : tex.read(tcoord, 0);
-    if (sample.a < 0.5f) {
+    // Soft edge: keep a small gap, then fade the cell over ~1px near its border
+    // instead of a hard cut, so cells look rounded rather than aliased squares.
+    const float gap = 0.16f;
+    float e = min(min(f.x, 1.0f - f.x), min(f.y, 1.0f - f.y));
+    float px = clamp(min(u.viewScaleX, u.viewScaleY), 0.0f, (0.5f - gap) * 0.9f);
+    float bodyA = sample.a * smoothstep(gap, gap + max(px, 1e-3f), e);
+    // Radial glow: a soft luminous halo that fades out from the cell center.
+    float d = length(f - 0.5f);
+    float glowA = sample.a * (1.0f - smoothstep(0.0f, 0.55f, d)) * u.glow;
+    float a = clamp(bodyA + glowA, 0.0f, 1.0f);
+    if (a < 0.004f) {
         return bg;
     }
-    return float4(sample.r, sample.g, sample.b, 1.0f);
+    float3 col = bg.rgb * (1.0f - a) + sample.rgb * a;
+    col += sample.rgb * glowA * 0.3f;
+    return float4(col, 1.0f);
 }
 
 // Advances one generation: reads cur plane, writes next plane.

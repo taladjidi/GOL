@@ -6,8 +6,9 @@
 
 A fast, interactive Conway's Game of Life for macOS, rendered entirely with
 Metal. The simulation runs in a GPU compute shader over a triple-buffered
-16-bit cell grid, with an interactive camera (pan/zoom), arbitrary B/S rules,
-classic presets, and three display modes.
+16-bit cell grid, with an interactive camera (pan/zoom), a famous-rules picker
+with per-neighbor B/S toggles, classic presets, four color palettes, a glow
+effect, and three display modes.
 
 ## Features
 
@@ -17,19 +18,26 @@ classic presets, and three display modes.
   generations), which the Age and Heatmap display modes visualize.
 - **Viewport-scaled grid**: the computational window grows and shrinks with
   what you can see: zoom out and the grid expands to cover the viewport (up to
-  a ~4M cell / ~8 MB per plane cap), zoom in and it contracts. Patterns are
-  preserved across resizes.
+  a 1 GiB total memory budget — tens of millions of cells), zoom in and it
+  contracts. Patterns are preserved across resizes.
 - **Camera**: scroll to zoom at the cursor, Option-drag (or middle-drag) to
   pan. At sub-pixel zoom levels the renderer switches to linear filtering with
   premultiplied alpha compositing so shrunken patterns stay smooth instead of
   aliasing.
-- **Arbitrary rules**: two multi-select sliders define any birth/survival
-  subset of the 8 neighbors (defaults to Conway's B3/S23).
+- **Arbitrary rules**: a famous-rules drop-down (Life, HighLife, Day & Night,
+  Seeds, Maze, Life w/o Death, Replicator, Diamoeba) plus per-neighbor B/S
+  toggles define any birth/survival subset of the 8 neighbors (defaults to
+  Conway's B3/S23).
 - **Presets**: Glider, Blinker, Block, Beacon, Toad, Pentadecathlon, LWSS,
-  R-Pentomino, and Heptomino.
-- **Display modes**: Age (viridis color by cell age), Trails (phosphor-style
-  persistence), and Heatmap.
-- **Live stats**: generation, population, max age, and FPS.
+  R-Pentomino, Heptomino, Pulsar, and Acorn.
+- **Display modes**: Age (color by cell age), Trails (phosphor-style
+  persistence), and Heatmap (accumulated heat by age).
+- **Color palettes**: Viridis, Inferno, Plasma, and Turbo — applied to the
+  Age and Heatmap modes.
+- **Glow / bloom**: a subtle additive glow around live cells, toggleable from
+  the toolbar or with `G`.
+- **Live stats**: generation, population (with a live trend sparkline), max
+  age, and FPS.
 
 ## Screenshots
 
@@ -78,24 +86,28 @@ and ships warning-free.
 
 | Key | Effect |
 | --- | --- |
-| `P` | Pause / resume |
-| `R` | Randomize the grid |
-| `Delete` | Clear the grid |
-| `Return` / `Enter` | Fit the grid to the window |
+| `Space` | Pause / resume |
+| `R` | Clear the grid |
+| `Z` | Randomize the grid |
+| `G` | Toggle glow / bloom |
+| `F` or `0` | Fit the pattern to the window |
 
 ### Toolbar
 
-- **B / S sliders**: multi-select the neighbor counts that trigger birth and
-  survival. The rule label shows the current rule (e.g. `B3/S23`).
+- **Rule**: a famous-rules drop-down plus a 2×9 grid of per-neighbor B/S
+  toggles. The rule label shows the current rule (e.g. `B3/S23`).
+- **Trend**: a live sparkline of population over recent generations.
+- **Glow**: toggle the additive glow / bloom effect.
 - **Density**: fill probability used by Randomize (default 20%).
 - **Speed**: generations per second, 1-120 (default 30).
 - **Preset**: drop-down of classic patterns; applying one clears the grid and
   places the pattern.
-- **Go / Clear**: run/pause and wipe the grid.
+- **Go / Random / Clear**: run/pause, seed a random soup, and wipe the grid.
 - **Display**: Age, Trails, or Heatmap.
+- **Palette**: Viridis, Inferno, Plasma, or Turbo.
 - **Tool**: Add or Erase (right-drag always does the opposite).
 - **Brush**: paint radius, 0-10 cells.
-- **Fit**: rescale the view so the whole grid is visible.
+- **Fit**: rescale the view so the pattern (or whole grid) is visible.
 
 ## How It Works
 

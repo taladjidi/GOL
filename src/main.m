@@ -33,18 +33,38 @@
 static const int INITIAL_GRID_W = 160;
 static const int INITIAL_GRID_H = 120;
 static const CGFloat CELL_PX = 6.0;
-static const CGFloat MIN_CELL_PX = 1.0;
-static const CGFloat MAX_CELL_PX = 64.0;
+static const CGFloat MIN_CELL_PX = 0.1;
+static const CGFloat MAX_CELL_PX = 128.0;
 static const int VIEW_W = (int)(INITIAL_GRID_W * CELL_PX);
 static const int VIEW_H = (int)(INITIAL_GRID_H * CELL_PX);
 static const int BAR_H = 120;
 static const int RENDER_SCALE = 1;
 static const int PLANE_COUNT = 3;
-static const NSUInteger MAX_PLANE_CELLS = 4000000;
+// Total simulation memory budget: the shared grid buffer, the CPU resize
+// scratch plane, and the cell + trail textures together. The maximum grid size
+// is derived from this in setupMetal, so a deep zoom-out grows the grid until
+// it would exceed the budget.
+static const NSUInteger MAX_TOTAL_MEMORY = 1024u * 1024u * 1024u; // 1 GiB
+// Peak per-cell footprint in bytes when the grid is at its maximum size:
+//   gridBuf   PLANE_COUNT * sizeof(uint16_t)   (3 planes, shared)
+//   resizeTmp sizeof(uint16_t)                 (1 CPU scratch plane)
+//   cellTex   4 * RENDER_SCALE^2               (BGRA8Unorm)
+//   trailTex  8 * RENDER_SCALE^2               (RGBA16Float)
+static const NSUInteger BYTES_PER_CELL =
+    PLANE_COUNT * (NSUInteger)sizeof(uint16_t) +
+    (NSUInteger)sizeof(uint16_t) +
+    4u * (NSUInteger)(RENDER_SCALE * RENDER_SCALE) +
+    8u * (NSUInteger)(RENDER_SCALE * RENDER_SCALE);
 static const int MAX_TEXTURE_SIZE = 16384;
 static const uint32_t DISPLAY_AGE = 0u;
 static const uint32_t DISPLAY_TRAILS = 1u;
 static const uint32_t DISPLAY_HEATMAP = 2u;
+
+// Color palettes for the Age/Heatmap display modes (index into the shader ramp).
+static const uint32_t PALETTE_VIRIDIS = 0u;
+static const uint32_t PALETTE_INFERNO = 1u;
+static const uint32_t PALETTE_PLASMA = 2u;
+static const uint32_t PALETTE_TURBO = 3u;
 
 #define GOL_MIN(A, B) ((A) < (B) ? (A) : (B))
 #define GOL_MAX(A, B) ((A) > (B) ? (A) : (B))
@@ -54,10 +74,8 @@ typedef struct {
     uint32_t gridH;
     uint32_t curOffset;
     uint32_t pad;
-    uint8_t birth;
-    uint8_t survival;
-    uint8_t pad2;
-    uint8_t pad3;
+    uint16_t birth;
+    uint16_t survival;
     float viewScaleX;
     float viewScaleY;
     float viewOffsetX;
@@ -65,7 +83,8 @@ typedef struct {
     float viewWidth;
     float viewHeight;
     uint32_t displayMode;
-    uint32_t pad4;
+    uint32_t palette;
+    float glow;
 } Uniforms;
 
 static MTLSize MakeSize(int w, int h, int d) {
@@ -123,133 +142,100 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 @class App;
 @class GOLView;
 
-@interface GOLRangeSlider : NSView
-@property (nonatomic, assign) int minValue;
-@property (nonatomic, assign) int maxValue;
-@property (nonatomic, assign) int defaultMin;
-@property (nonatomic, assign) int defaultMax;
-@property (nonatomic, assign) int draggingHandle;
-@property (nonatomic, copy) void (^rangeChanged)(void);
-- (instancetype)initWithFrame:(NSRect)frame
-                     minValue:(int)minValue
-                          max:(int)maxValue
-                   defaultMin:(int)defaultMin
-                   defaultMax:(int)defaultMax;
-- (void)setRange:(int)minValue max:(int)maxValue;
+@interface GOLRuleToggleView : NSView
+@property (nonatomic, assign) uint16_t birth;
+@property (nonatomic, assign) uint16_t survival;
+@property (nonatomic, copy) void (^toggleChanged)(void);
+- (void)setBirth:(uint16_t)b survival:(uint16_t)s;
 @end
 
-@implementation GOLRangeSlider
+@implementation GOLRuleToggleView
 
-@synthesize minValue = _minValue;
-@synthesize maxValue = _maxValue;
-@synthesize defaultMin = _defaultMin;
-@synthesize defaultMax = _defaultMax;
-@synthesize draggingHandle = _draggingHandle;
-@synthesize rangeChanged = _rangeChanged;
+@synthesize birth = _birth;
+@synthesize survival = _survival;
+@synthesize toggleChanged = _toggleChanged;
 
-- (instancetype)initWithFrame:(NSRect)frame
-                     minValue:(int)minValue
-                          max:(int)maxValue
-                   defaultMin:(int)defaultMin
-                   defaultMax:(int)defaultMax {
+- (instancetype)initWithFrame:(NSRect)frame {
     if ((self = [super initWithFrame:frame])) {
-        self.minValue = minValue;
-        self.maxValue = maxValue;
-        self.defaultMin = defaultMin;
-        self.defaultMax = defaultMax;
-        self.draggingHandle = -1;
-        self.rangeChanged = nil;
+        self.birth = (1u << 3);                  // B3
+        self.survival = (1u << 2) | (1u << 3);  // S23
+        self.toggleChanged = nil;
         self.wantsLayer = YES;
         self.layer.backgroundColor = [NSColor clearColor].CGColor;
-        self.toolTip = @"Drag handles to set rule range";
+        self.toolTip = @"Click a cell to toggle that neighbor count";
     }
     return self;
 }
 
-- (void)setRange:(int)minValue max:(int)maxValue {
-    int t;
-    self.minValue = GOL_MIN(GOL_MAX(minValue, 0), 8);
-    self.maxValue = GOL_MIN(GOL_MAX(maxValue, 0), 8);
-    if (self.minValue > self.maxValue) {
-        t = self.minValue;
-        self.minValue = self.maxValue;
-        self.maxValue = t;
-    }
+- (void)setBirth:(uint16_t)b survival:(uint16_t)s {
+    self.birth = b & 0x1FFu;
+    self.survival = s & 0x1FFu;
     [self setNeedsDisplay:YES];
 }
 
+- (NSRect)cellRect:(int)row col:(int)col {
+    CGFloat labelW = 14.0;
+    CGFloat cellW = 15.0;
+    CGFloat gap = 1.0;
+    CGFloat rowH = 16.0;
+    NSRect bounds = [self bounds];
+    CGFloat x = labelW + (CGFloat)col * (cellW + gap);
+    CGFloat y = bounds.size.height - rowH * (CGFloat)(row + 1);
+    return NSMakeRect(x, y, cellW, rowH);
+}
+
 - (void)drawRect:(NSRect)dirtyRect {
-    NSRect bounds;
-    CGFloat trackY;
-    CGFloat trackH;
-    CGFloat trackX;
-    CGFloat trackW;
-    NSBezierPath *trackPath;
-    CGFloat defX1;
-    CGFloat defX2;
-    NSBezierPath *defPath;
-    CGFloat actX1;
-    CGFloat actX2;
-    NSBezierPath *actPath;
-    int i;
-    CGFloat lx;
-    NSString *label;
-    NSDictionary *attrs;
-    NSSize textSize;
-    NSPoint textPoint;
-    int handleIndex;
-    int val;
-    CGFloat hx;
-    CGFloat handleR;
-    NSBezierPath *handlePath;
+    NSColor *on;
+    NSColor *off;
+    NSDictionary *attrsOn;
+    NSDictionary *attrsOff;
+    NSDictionary *lblAttrs;
+    NSString *lbl;
+    NSSize lblSize;
+    int row;
+    int col;
 
     (void)dirtyRect;
     [super drawRect:dirtyRect];
 
-    bounds = [self bounds];
-    trackY = bounds.size.height * 0.5;
-    trackH = 6.0;
-    trackX = 10.0;
-    trackW = bounds.size.width - 20.0;
+    on = [NSColor colorWithSRGBRed:0.25 green:0.70 blue:0.40 alpha:1.0];
+    off = [NSColor colorWithSRGBRed:0.16 green:0.19 blue:0.24 alpha:1.0];
+    attrsOn = @{ NSFontAttributeName: [NSFont systemFontOfSize:9 weight:NSFontWeightSemibold],
+                 NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.05 green:0.10 blue:0.05 alpha:1.0] };
+    attrsOff = @{ NSFontAttributeName: [NSFont systemFontOfSize:9],
+                  NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.60 green:0.65 blue:0.70 alpha:1.0] };
+    lblAttrs = @{ NSFontAttributeName: [NSFont systemFontOfSize:10 weight:NSFontWeightBold],
+                  NSForegroundColorAttributeName: [NSColor whiteColor] };
 
-    trackPath = [NSBezierPath bezierPathWithRoundedRect:NSMakeRect(trackX, trackY - trackH * 0.5, trackW, trackH) xRadius:3.0 yRadius:3.0];
-    [[NSColor colorWithSRGBRed:0.15 green:0.18 blue:0.22 alpha:1.0] setFill];
-    [trackPath fill];
+    for (row = 0; row < 2; row++) {
+        NSRect cell0;
+        lbl = (row == 0) ? @"B" : @"S";
+        cell0 = [self cellRect:row col:0];
+        lblSize = [lbl sizeWithAttributes:lblAttrs];
+        [lbl drawAtPoint:NSMakePoint(2.0, cell0.origin.y + (cell0.size.height - lblSize.height) * 0.5)
+          withAttributes:lblAttrs];
+        for (col = 0; col < 9; col++) {
+            uint16_t mask;
+            BOOL set;
+            NSRect r;
+            NSBezierPath *p;
+            NSString *num;
+            NSDictionary *a;
+            NSSize sz;
 
-    if (self.defaultMin <= self.defaultMax) {
-        defX1 = trackX + (self.defaultMin / 8.0) * trackW;
-        defX2 = trackX + (self.defaultMax / 8.0) * trackW;
-        defPath = [NSBezierPath bezierPathWithRoundedRect:NSMakeRect(defX1, trackY - trackH * 0.5 - 2, defX2 - defX1, trackH + 4) xRadius:4.0 yRadius:4.0];
-        [[NSColor colorWithSRGBRed:0.3 green:0.6 blue:0.35 alpha:0.25] setFill];
-        [defPath fill];
-    }
-
-    actX1 = trackX + (self.minValue / 8.0) * trackW;
-    actX2 = trackX + (self.maxValue / 8.0) * trackW;
-    actPath = [NSBezierPath bezierPathWithRoundedRect:NSMakeRect(actX1, trackY - trackH * 0.5, actX2 - actX1, trackH) xRadius:3.0 yRadius:3.0];
-    [[NSColor colorWithSRGBRed:0.25 green:0.7 blue:0.35 alpha:0.6] setFill];
-    [actPath fill];
-
-    for (i = 0; i <= 8; i++) {
-        lx = trackX + (i / 8.0) * trackW;
-        label = [NSString stringWithFormat:@"%d", i];
-        attrs = @{ NSFontAttributeName: [NSFont systemFontOfSize:9],
-                   NSForegroundColorAttributeName: (i >= self.minValue && i <= self.maxValue) ? [NSColor whiteColor] : [NSColor colorWithSRGBRed:0.5 green:0.55 blue:0.6 alpha:1.0] };
-        textSize = [label sizeWithAttributes:attrs];
-        textPoint = NSMakePoint(lx - textSize.width * 0.5, trackY + 8);
-        [label drawAtPoint:textPoint withAttributes:attrs];
-    }
-
-    handleR = 8.0;
-    for (handleIndex = 0; handleIndex < 2; handleIndex++) {
-        val = (handleIndex == 0) ? self.minValue : self.maxValue;
-        hx = trackX + (val / 8.0) * trackW;
-        handlePath = [NSBezierPath bezierPathWithOvalInRect:NSMakeRect(hx - handleR, trackY - handleR, handleR * 2, handleR * 2)];
-        [[NSColor colorWithSRGBRed:0.9 green:0.92 blue:0.95 alpha:1.0] setFill];
-        [handlePath fill];
-        [[NSColor colorWithSRGBRed:0.4 green:0.45 blue:0.5 alpha:1.0] setStroke];
-        handlePath.lineWidth = 1.5;
-        [handlePath stroke];
+            mask = (row == 0) ? self.birth : self.survival;
+            set = ((mask >> col) & 1u) != 0u;
+            r = [self cellRect:row col:col];
+            p = [NSBezierPath bezierPathWithRoundedRect:r xRadius:3.0 yRadius:3.0];
+            [(set ? on : off) setFill];
+            [p fill];
+            num = [NSString stringWithFormat:@"%d", col];
+            a = set ? attrsOn : attrsOff;
+            sz = [num sizeWithAttributes:a];
+            [num drawAtPoint:NSMakePoint(r.origin.x + (r.size.width - sz.width) * 0.5,
+                                         r.origin.y + (r.size.height - sz.height) * 0.5)
+               withAttributes:a];
+        }
     }
 }
 
@@ -263,69 +249,178 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 
 - (void)mouseDown:(NSEvent *)e {
     NSPoint pt;
-    CGFloat trackX;
-    CGFloat trackW;
-    CGFloat minHx;
-    CGFloat maxHx;
-    CGFloat distMin;
-    CGFloat distMax;
+    int row;
+    int col;
 
     [self becomeFirstResponder];
     pt = [self convertPoint:[e locationInWindow] fromView:nil];
-    trackX = 10.0;
-    trackW = [self bounds].size.width - 20.0;
-
-    minHx = trackX + (self.minValue / 8.0) * trackW;
-    maxHx = trackX + (self.maxValue / 8.0) * trackW;
-
-    distMin = fabs(pt.x - minHx);
-    distMax = fabs(pt.x - maxHx);
-
-    if (distMin < distMax && distMin < 15.0) {
-        self.draggingHandle = 0;
-    } else if (distMax < 15.0) {
-        self.draggingHandle = 1;
+    for (row = 0; row < 2; row++) {
+        for (col = 0; col < 9; col++) {
+            NSRect r = [self cellRect:row col:col];
+            if (NSPointInRect(pt, NSInsetRect(r, -2.0, -2.0))) {
+                if (row == 0) {
+                    self.birth = (uint16_t)(self.birth ^ (1u << col));
+                } else {
+                    self.survival = (uint16_t)(self.survival ^ (1u << col));
+                }
+                [self setNeedsDisplay:YES];
+                if (self.toggleChanged != nil) {
+                    self.toggleChanged();
+                }
+                return;
+            }
+        }
     }
-}
-
-- (void)mouseDragged:(NSEvent *)e {
-    NSPoint pt;
-    CGFloat trackX;
-    CGFloat trackW;
-    double valD;
-    int val;
-
-    if (self.draggingHandle < 0) {
-        return;
-    }
-
-    pt = [self convertPoint:[e locationInWindow] fromView:nil];
-    trackX = 10.0;
-    trackW = [self bounds].size.width - 20.0;
-
-    valD = (pt.x - trackX) / trackW * 8.0;
-    val = LroundInt(valD);
-    val = GOL_MIN(GOL_MAX(val, 0), 8);
-
-    if (self.draggingHandle == 0) {
-        self.minValue = GOL_MIN(val, self.maxValue);
-    } else {
-        self.maxValue = GOL_MAX(val, self.minValue);
-    }
-
-    [self setNeedsDisplay:YES];
-
-    if (self.rangeChanged != nil) {
-        self.rangeChanged();
-    }
-}
-
-- (void)mouseUp:(NSEvent *)e {
-    (void)e;
-    self.draggingHandle = -1;
 }
 
 @end
+
+// A small live chart of the recent population history.
+static const int kSparkCapacity = 120;
+
+@interface GOLSparklineView : NSView
+@property (nonatomic, assign) int *values; // ring buffer of population samples
+@property (nonatomic, assign) int head;    // index of the next slot to write
+@property (nonatomic, assign) int count;   // number of valid samples (<= kSparkCapacity)
+- (void)pushValue:(int)v;
+- (void)resetBuffer;
+@end
+
+@implementation GOLSparklineView
+
+@synthesize values = _values;
+@synthesize head = _head;
+@synthesize count = _count;
+
+- (instancetype)initWithFrame:(NSRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.wantsLayer = YES;
+        self.layer.backgroundColor = [NSColor colorWithSRGBRed:0.05 green:0.06 blue:0.09 alpha:1.0].CGColor;
+        self.values = (int *)calloc((size_t)kSparkCapacity, sizeof(int));
+        self.head = 0;
+        self.count = 0;
+    }
+    return self;
+}
+
+- (void)dealloc {
+    free(self.values);
+}
+
+- (void)pushValue:(int)v {
+    if (self.values == NULL) {
+        return;
+    }
+    self.values[self.head] = v;
+    self.head = (self.head + 1) % kSparkCapacity;
+    if (self.count < kSparkCapacity) {
+        self.count++;
+    }
+    [self setNeedsDisplay:YES];
+}
+
+- (void)resetBuffer {
+    int i;
+    if (self.values == NULL) {
+        return;
+    }
+    for (i = 0; i < kSparkCapacity; i++) {
+        self.values[i] = 0;
+    }
+    self.head = 0;
+    self.count = 0;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+    NSRect b;
+    int maxV;
+    int i;
+    NSBezierPath *area;
+    NSBezierPath *line;
+    NSColor *fillC;
+    NSColor *lineC;
+
+    (void)dirtyRect;
+    [super drawRect:dirtyRect];
+    b = [self bounds];
+    if (b.size.width < 2.0 || b.size.height < 2.0 || self.count < 1) {
+        return;
+    }
+
+    maxV = 1;
+    for (i = 0; i < self.count; i++) {
+        int idx = (self.head - self.count + i + kSparkCapacity) % kSparkCapacity;
+        if (self.values[idx] > maxV) {
+            maxV = self.values[idx];
+        }
+    }
+    lineC = [NSColor colorWithSRGBRed:0.45 green:0.85 blue:1.00 alpha:1.0];
+
+    if (self.count == 1) {
+        // A single sample (e.g. right after loading a pattern while the sim is
+        // paused): render it as a dot at the right edge so the chart never looks
+        // empty. It grows into a trace once generations start advancing.
+        int idx = (self.head - 1 + kSparkCapacity) % kSparkCapacity;
+        CGFloat py = b.size.height - 1.0 - (b.size.height - 2.0) * ((CGFloat)self.values[idx] / (CGFloat)maxV);
+        NSBezierPath *dot = [NSBezierPath bezierPathWithOvalInRect:
+            NSMakeRect(b.size.width - 4.0, py - 2.0, 4.0, 4.0)];
+        [lineC setFill];
+        [dot fill];
+        return;
+    }
+
+    area = [NSBezierPath bezierPath];
+    line = [NSBezierPath bezierPath];
+    [area moveToPoint:NSMakePoint(0.0, b.size.height)];
+    for (i = 0; i < self.count; i++) {
+        int idx = (self.head - self.count + i + kSparkCapacity) % kSparkCapacity;
+        CGFloat px;
+        CGFloat py;
+        // Plot the most recent samples across the full width so the trace
+        // scrolls left as new generations arrive.
+        px = (b.size.width - 1.0) * ((CGFloat)i / (CGFloat)(self.count - 1));
+        py = b.size.height - 1.0 - (b.size.height - 2.0) * ((CGFloat)self.values[idx] / (CGFloat)maxV);
+        [area lineToPoint:NSMakePoint(px, py)];
+        if (i == 0) {
+            [line moveToPoint:NSMakePoint(px, py)];
+        } else {
+            [line lineToPoint:NSMakePoint(px, py)];
+        }
+    }
+    [area lineToPoint:NSMakePoint(b.size.width, b.size.height)];
+    [area closePath];
+
+    fillC = [NSColor colorWithSRGBRed:0.20 green:0.65 blue:0.85 alpha:0.30];
+    [fillC setFill];
+    [area fill];
+    line.lineWidth = 1.5;
+    [lineC setStroke];
+    [line stroke];
+}
+
+@end
+
+// Famous rule presets. bit n set if the rule acts on exactly n neighbors (0..8).
+typedef struct {
+    const char *name;
+    uint16_t birth;
+    uint16_t survival;
+    uint32_t pad; // explicit padding: keeps 8-byte alignment without implicit gaps
+} GOLFamousRule;
+
+static const GOLFamousRule kFamousRules[] = {
+    { "Life",           (1u << 3), (1u << 2) | (1u << 3), 0 },
+    { "HighLife",       (1u << 3) | (1u << 6), (1u << 2) | (1u << 3), 0 },
+    { "Day & Night",    (1u << 3) | (1u << 6), (1u << 1) | (1u << 3) | (1u << 5) | (1u << 6), 0 },
+    { "Seeds",          (1u << 2), 0, 0 },
+    { "Maze",           (1u << 3), (1u << 1) | (1u << 3) | (1u << 5) | (1u << 6) | (1u << 7) | (1u << 8), 0 },
+    { "Life w/o Death", (1u << 3), (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4) | (1u << 5) | (1u << 6) | (1u << 7) | (1u << 8), 0 },
+    { "Replicator",     (1u << 1) | (1u << 3) | (1u << 5) | (1u << 7), (1u << 1) | (1u << 3) | (1u << 5) | (1u << 7), 0 },
+    { "Diamoeba",       (1u << 3) | (1u << 5) | (1u << 6) | (1u << 7) | (1u << 8), (1u << 5) | (1u << 6) | (1u << 7) | (1u << 8), 0 },
+};
+
+static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousRules[0]));
 
 @interface App : NSObject <NSApplicationDelegate, NSWindowDelegate, MTKViewDelegate>
 @property (nonatomic, strong) NSWindow *window;
@@ -371,10 +466,11 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 @property (nonatomic, strong) NSTextField *ruleLabel;
 @property (nonatomic, strong) NSTextField *popLabel;
 @property (nonatomic, strong) NSTextField *maxAgeLabel;
+@property (nonatomic, strong) GOLSparklineView *popSpark;
 @property (nonatomic, strong) NSSlider *speedSlider;
 @property (nonatomic, strong) NSTextField *speedLabel;
-@property (nonatomic, strong) GOLRangeSlider *birthRangeView;
-@property (nonatomic, strong) GOLRangeSlider *survRangeView;
+@property (nonatomic, strong) NSPopUpButton *rulePopup;
+@property (nonatomic, strong) GOLRuleToggleView *ruleToggleView;
 @property (nonatomic, assign) CFTimeInterval genAccum;
 @property (nonatomic, assign) CGFloat cellPx;
 @property (nonatomic, assign) CGFloat viewOffsetX;
@@ -385,7 +481,11 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 @property (nonatomic, assign) CGFloat lastPanX;
 @property (nonatomic, assign) CGFloat lastPanY;
 @property (nonatomic, assign) uint32_t displayMode;
+@property (nonatomic, assign) uint32_t palette;
+@property (nonatomic, assign) BOOL glowOn;
 @property (nonatomic, strong) NSPopUpButton *displayPopup;
+@property (nonatomic, strong) NSPopUpButton *palettePopup;
+@property (nonatomic, strong) NSButton *glowButton;
 @property (nonatomic, strong) NSSegmentedControl *toolControl;
 @property (nonatomic, strong) NSSlider *brushSlider;
 @property (nonatomic, strong) NSTextField *brushLabel;
@@ -397,6 +497,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 - (BOOL)setupMetal;
 - (void)setupUI;
 - (void)randomize;
+- (void)randomize:(id)sender;
 - (void)goPause:(id)sender;
 - (void)clear:(id)sender;
 - (void)clear;
@@ -406,6 +507,8 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 - (void)updateHintLabel;
 - (void)toolChanged:(id)sender;
 - (void)displayChanged:(id)sender;
+- (void)paletteChanged:(id)sender;
+- (void)glowToggle:(id)sender;
 - (void)clearTrailNow;
 - (void)beginPanAtEvent:(NSEvent *)e;
 - (void)panWithEvent:(NSEvent *)e;
@@ -430,7 +533,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 - (void)tick;
 - (void)drawInMTKView:(MTKView *)view;
 - (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size;
-- (void)ruleSliderChanged:(id)sender;
+- (void)rulePopupChanged:(id)sender;
 - (void)rulePresetClicked:(id)sender;
 - (void)applyPreset:(const char *)name;
 - (void)updateRuleUI;
@@ -593,10 +696,11 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 @synthesize ruleLabel = _ruleLabel;
 @synthesize popLabel = _popLabel;
 @synthesize maxAgeLabel = _maxAgeLabel;
+@synthesize popSpark = _popSpark;
 @synthesize speedSlider = _speedSlider;
 @synthesize speedLabel = _speedLabel;
-@synthesize birthRangeView = _birthRangeView;
-@synthesize survRangeView = _survRangeView;
+@synthesize rulePopup = _rulePopup;
+@synthesize ruleToggleView = _ruleToggleView;
 @synthesize genAccum = _genAccum;
 @synthesize cellPx = _cellPx;
 @synthesize viewOffsetX = _viewOffsetX;
@@ -607,7 +711,11 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 @synthesize lastPanX = _lastPanX;
 @synthesize lastPanY = _lastPanY;
 @synthesize displayMode = _displayMode;
+@synthesize palette = _palette;
+@synthesize glowOn = _glowOn;
 @synthesize displayPopup = _displayPopup;
+@synthesize palettePopup = _palettePopup;
+@synthesize glowButton = _glowButton;
 @synthesize toolControl = _toolControl;
 @synthesize brushSlider = _brushSlider;
 @synthesize brushLabel = _brushLabel;
@@ -620,6 +728,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     NSArray<NSString *> *args;
     NSString *mode = nil;
     NSString *preset = nil;
+    NSString *palette = nil;
     const char *env;
     double val;
     NSUInteger i;
@@ -631,10 +740,12 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
             NSString *n = args[i + 1];
             if ([a caseInsensitiveCompare:@"--mode"] == NSOrderedSame) { mode = n; i++; }
             else if ([a caseInsensitiveCompare:@"--preset"] == NSOrderedSame) { preset = n; i++; }
+            else if ([a caseInsensitiveCompare:@"--palette"] == NSOrderedSame) { palette = n; i++; }
         }
     }
     if (mode == nil && (env = getenv("GOL_MODE")) != NULL) mode = [NSString stringWithUTF8String:env];
     if (preset == nil && (env = getenv("GOL_PRESET")) != NULL) preset = [NSString stringWithUTF8String:env];
+    if (palette == nil && (env = getenv("GOL_PALETTE")) != NULL) palette = [NSString stringWithUTF8String:env];
     if ((env = getenv("GOL_DENSITY")) != NULL && self.densitySlider != nil) {
         val = atof(env);
         if (val < 0.0) val = 0.0;
@@ -648,6 +759,13 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
         if ([m isEqualToString:@"age"]) self.displayMode = DISPLAY_AGE;
         else if ([m isEqualToString:@"trails"]) self.displayMode = DISPLAY_TRAILS;
         else if ([m isEqualToString:@"heatmap"]) self.displayMode = DISPLAY_HEATMAP;
+    }
+    if (palette != nil && palette.length > 0) {
+        NSString *p = [palette lowercaseString];
+        if ([p isEqualToString:@"inferno"]) self.palette = PALETTE_INFERNO;
+        else if ([p isEqualToString:@"plasma"]) self.palette = PALETTE_PLASMA;
+        else if ([p isEqualToString:@"turbo"]) self.palette = PALETTE_TURBO;
+        else self.palette = PALETTE_VIRIDIS;
     }
     if (preset != nil && preset.length > 0) {
         [self applyPreset:[preset UTF8String]];
@@ -681,6 +799,8 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     self.lastPanX = 0.0;
     self.lastPanY = 0.0;
     self.displayMode = DISPLAY_AGE;
+    self.palette = PALETTE_VIRIDIS;
+    self.glowOn = YES;
     if (![self setupMetal]) {
         NSLog(@"Metal setup failed");
         [NSApp terminate:nil];
@@ -699,6 +819,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     CGFloat screenW;
     CGFloat screenH;
     NSUInteger need;
+    NSUInteger budgetCells;
     MTLRenderPipelineDescriptor *rp;
     MTLRenderPipelineDescriptor *sp;
     id<MTLFunction> stepFunc;
@@ -744,9 +865,14 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     self.maxGridH = GOL_MAX(self.maxGridH, INITIAL_GRID_H);
     self.maxGridW = GOL_MIN(self.maxGridW, MAX_TEXTURE_SIZE / (int)RENDER_SCALE);
     self.maxGridH = GOL_MIN(self.maxGridH, MAX_TEXTURE_SIZE / (int)RENDER_SCALE);
+    // Cap the maximum grid so the peak footprint (grid buffer + CPU scratch +
+    // cell/trail textures) stays under MAX_TOTAL_MEMORY. This is what actually
+    // bounds how far out you can zoom.
+    budgetCells = MAX_TOTAL_MEMORY / BYTES_PER_CELL;
+    if (budgetCells < 64) budgetCells = 64;
     need = (NSUInteger)self.maxGridW * (NSUInteger)self.maxGridH;
-    if (need > MAX_PLANE_CELLS) {
-        double shrink = sqrt((double)MAX_PLANE_CELLS / (double)need);
+    if (need > budgetCells) {
+        double shrink = sqrt((double)budgetCells / (double)need);
         self.maxGridW = GOL_MAX(8, FloorInt((double)self.maxGridW * shrink));
         self.maxGridH = GOL_MAX(8, FloorInt((double)self.maxGridH * shrink));
         need = (NSUInteger)self.maxGridW * (NSUInteger)self.maxGridH;
@@ -764,6 +890,10 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
         return NO;
     }
     memset([self.gridBuf contents], 0, (size_t)PLANE_COUNT * self.planeBytes);
+    NSLog(@"GOL: grid up to %lux%lu (%.1fM cells), peak ~%.0f MB of 1024 MB budget",
+          (unsigned long)self.maxGridW, (unsigned long)self.maxGridH,
+          (double)self.planeCells / 1e6,
+          (double)(self.planeCells * BYTES_PER_CELL) / 1048576.0);
 
     self.uniformsBuf = [self.device newBufferWithLength:sizeof(Uniforms) options:MTLResourceStorageModeShared];
     if (self.uniformsBuf == nil) {
@@ -832,57 +962,33 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 
 - (void)updateRuleUI {
     GOLRules r;
-    uint8_t b;
-    uint8_t s;
-    int bMin;
-    int bMax;
-    int sMin;
-    int sMax;
+    uint16_t b;
+    uint16_t s;
     int i;
-    GOLRangeSlider *bv;
-    GOLRangeSlider *sv;
+    int match;
+    int sel;
     NSMutableString *label;
 
     r = self.rules;
-    b = r.birth;
-    s = r.survival;
+    b = r.birth & 0x1FFu;
+    s = r.survival & 0x1FFu;
 
-    bMin = 8;
-    bMax = 0;
-    for (i = 0; i < 9; i++) {
-        if ((b >> i) & 1u) {
-            bMin = GOL_MIN(bMin, i);
-            bMax = GOL_MAX(bMax, i);
-        }
-    }
-    if (bMin > bMax) {
-        bMin = 3;
-        bMax = 3;
+    if (self.ruleToggleView != nil) {
+        [self.ruleToggleView setBirth:b survival:s];
     }
 
-    sMin = 8;
-    sMax = 0;
-    for (i = 0; i < 9; i++) {
-        if ((s >> i) & 1u) {
-            sMin = GOL_MIN(sMin, i);
-            sMax = GOL_MAX(sMax, i);
+    // Select the matching famous rule in the dropdown, else "Custom".
+    match = -1;
+    for (i = 0; i < kFamousRuleCount; i++) {
+        if (kFamousRules[i].birth == b && kFamousRules[i].survival == s) {
+            match = i;
+            break;
         }
     }
-    if (sMin > sMax) {
-        sMin = 2;
-        sMax = 3;
+    sel = (match >= 0) ? match : kFamousRuleCount;
+    if (self.rulePopup != nil && (int)[self.rulePopup indexOfSelectedItem] != sel) {
+        [self.rulePopup selectItemAtIndex:sel];
     }
-
-    bv = self.birthRangeView;
-    sv = self.survRangeView;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (bv != nil) {
-            [bv setRange:bMin max:bMax];
-        }
-        if (sv != nil) {
-            [sv setRange:sMin max:sMax];
-        }
-    });
 
     label = [NSMutableString string];
     [label appendString:@"B"];
@@ -923,6 +1029,9 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     if (self.genLabel != nil) {
         self.genLabel.stringValue = @"Gen 0";
     }
+    if (self.popSpark != nil) {
+        [self.popSpark resetBuffer];
+    }
     [self markDirty];
 }
 
@@ -947,47 +1056,28 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
         [self applyPreset:"r-pentomino"];
     } else if ([preset isEqualToString:@"Heptomino"]) {
         [self applyPreset:"heptomino"];
+    } else if ([preset isEqualToString:@"Pulsar"]) {
+        [self applyPreset:"pulsar"];
+    } else if ([preset isEqualToString:@"Acorn"]) {
+        [self applyPreset:"acorn"];
     }
 }
 
-- (void)ruleSliderChanged:(id)sender {
+- (void)rulePopupChanged:(id)sender {
     GOLRules r;
-    int bMin;
-    int bMax;
-    int sMin;
-    int sMax;
-    int i;
-    int t;
+    int idx;
 
     (void)sender;
-
-    bMin = self.birthRangeView ? [self.birthRangeView minValue] : 3;
-    bMax = self.birthRangeView ? [self.birthRangeView maxValue] : 3;
-    sMin = self.survRangeView ? [self.survRangeView minValue] : 2;
-    sMax = self.survRangeView ? [self.survRangeView maxValue] : 3;
-
-    if (bMin > bMax) {
-        t = bMin;
-        bMin = bMax;
-        bMax = t;
+    if (self.rulePopup == nil) {
+        return;
     }
-    if (sMin > sMax) {
-        t = sMin;
-        sMin = sMax;
-        sMax = t;
+    idx = (int)[self.rulePopup indexOfSelectedItem];
+    if (idx >= 0 && idx < kFamousRuleCount) {
+        r = self.rules;
+        r.birth = kFamousRules[idx].birth;
+        r.survival = kFamousRules[idx].survival;
+        self.rules = r;
     }
-
-    r = self.rules;
-    r.birth = 0;
-    for (i = bMin; i <= bMax; i++) {
-        r.birth = (uint8_t)(r.birth | (1u << i));
-    }
-    r.survival = 0;
-    for (i = sMin; i <= sMax; i++) {
-        r.survival = (uint8_t)(r.survival | (1u << i));
-    }
-    self.rules = r;
-
     [self updateRuleUI];
 }
 
@@ -1027,7 +1117,15 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     if (self.genLabel != nil) {
         self.genLabel.stringValue = @"Gen 0";
     }
+    if (self.popSpark != nil) {
+        [self.popSpark resetBuffer];
+    }
     [self markDirty];
+}
+
+- (void)randomize:(id)sender {
+    (void)sender;
+    [self randomize];
 }
 
 - (void)goPause:(id)sender {
@@ -1071,6 +1169,9 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     }
     if (self.genLabel != nil) {
         self.genLabel.stringValue = @"Gen 0";
+    }
+    if (self.popSpark != nil) {
+        [self.popSpark resetBuffer];
     }
     [self markDirty];
 }
@@ -1121,9 +1222,31 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
 
 - (void)fitView {
     NSRect bounds;
+    uint16_t *cells;
+    int y;
+    int x;
+    int dMinCol;
+    int dMaxCol;
+    int dMinRow;
+    int dMaxRow;
+    int rMinCol;
+    int rMaxCol;
+    int rMinRow;
+    int rMaxRow;
+    int hasPattern;
+    int compact;
+    double pw;
+    double ph;
+    double bw;
+    double bh;
+    double margin;
+    double fitW;
+    double fitH;
     double scaleW;
     double scaleH;
     double s;
+    double centerCol;
+    double centerRow;
 
     if (self.mtkView == nil || self.gridW < 1 || self.gridH < 1) {
         return;
@@ -1132,13 +1255,69 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     if (bounds.size.width < 1.0 || bounds.size.height < 1.0) {
         return;
     }
-    scaleW = bounds.size.width / (double)self.gridW;
-    scaleH = bounds.size.height / (double)self.gridH;
+
+    // Bounding box of the live cells in the currently displayed plane.
+    dMinCol = self.gridW;
+    dMaxCol = -1;
+    dMinRow = self.gridH;
+    dMaxRow = -1;
+    cells = [self currentCells];
+    if (cells != nil) {
+        for (y = 0; y < self.gridH; y++) {
+            for (x = 0; x < self.gridW; x++) {
+                if (GolAlive(cells[(size_t)y * (size_t)self.gridW + (size_t)x])) {
+                    if (x < dMinCol) dMinCol = x;
+                    if (x > dMaxCol) dMaxCol = x;
+                    if (y < dMinRow) dMinRow = y;
+                    if (y > dMaxRow) dMaxRow = y;
+                }
+            }
+        }
+    }
+
+    hasPattern = (dMaxCol >= dMinCol && dMaxRow >= dMinRow);
+    pw = hasPattern ? (double)(dMaxCol - dMinCol + 1) : 0.0;
+    ph = hasPattern ? (double)(dMaxRow - dMinRow + 1) : 0.0;
+    // Only treat it as a "pattern" if it is clearly smaller than the whole
+    // grid; otherwise (a full soup) we fit the entire grid as before.
+    compact = hasPattern && pw <= (double)self.gridW * 0.9 && ph <= (double)self.gridH * 0.9;
+
+    if (compact) {
+        rMinCol = dMinCol;
+        rMaxCol = dMaxCol;
+        rMinRow = dMinRow;
+        rMaxRow = dMaxRow;
+        bw = pw;
+        bh = ph;
+    } else {
+        rMinCol = 0;
+        rMaxCol = self.gridW - 1;
+        rMinRow = 0;
+        rMaxRow = self.gridH - 1;
+        bw = (double)self.gridW;
+        bh = (double)self.gridH;
+    }
+
+    if (compact) {
+        // Add breathing room so the pattern is not edge-to-edge.
+        margin = fmax(4.0, fmin(bw, bh) * 0.2);
+        fitW = bw + 2.0 * margin;
+        fitH = bh + 2.0 * margin;
+    } else {
+        fitW = bw;
+        fitH = bh;
+    }
+
+    scaleW = bounds.size.width / fitW;
+    scaleH = bounds.size.height / fitH;
     s = GOL_MIN(scaleW, scaleH);
-    s = ClampDouble(s, 0.01, (double)MAX_CELL_PX);
+    s = ClampDouble(s, (double)MIN_CELL_PX, (double)MAX_CELL_PX);
     self.cellPx = (CGFloat)s;
-    self.viewOffsetX = (CGFloat)((bounds.size.width - (double)self.gridW * s) / 2.0);
-    self.viewOffsetY = (CGFloat)((bounds.size.height - (double)self.gridH * s) / 2.0);
+
+    centerCol = (double)(rMinCol + rMaxCol) * 0.5;
+    centerRow = (double)(rMinRow + rMaxRow) * 0.5;
+    self.viewOffsetX = (CGFloat)(bounds.size.width * 0.5 - centerCol * s);
+    self.viewOffsetY = (CGFloat)(bounds.size.height * 0.5 - centerRow * s);
     [self updateZoomLabel];
     [self requestGridResize];
 }
@@ -1188,6 +1367,29 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     self.displayMode = (uint32_t)index;
     if (self.displayMode == DISPLAY_TRAILS) {
         [self clearTrailNow];
+    }
+    [self markDirty];
+}
+
+- (void)paletteChanged:(id)sender {
+    int index;
+    (void)sender;
+    if (self.palettePopup == nil) {
+        return;
+    }
+    index = (int)self.palettePopup.indexOfSelectedItem;
+    if (index < 0 || index > (int)PALETTE_TURBO) {
+        index = 0;
+    }
+    self.palette = (uint32_t)index;
+    [self markDirty];
+}
+
+- (void)glowToggle:(id)sender {
+    (void)sender;
+    self.glowOn = !self.glowOn;
+    if (self.glowButton != nil) {
+        self.glowButton.state = self.glowOn ? NSControlStateValueOn : NSControlStateValueOff;
     }
     [self markDirty];
 }
@@ -1345,6 +1547,9 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
             return YES;
         case 6:
             [self randomize];
+            return YES;
+        case 5:
+            [self glowToggle:nil];
             return YES;
         case 3:
         case 29:
@@ -1572,6 +1777,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     CGFloat x;
     CGFloat y;
     NSButton *clearButton;
+    NSButton *randomButton;
     NSButton *fitButton;
     NSPopUpButton *presetsPopup;
     __weak App *weakSelf;
@@ -1614,27 +1820,29 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     [bar addSubview:self.fpsLabel];
     x += 90;
 
-    [bar addSubview:MakeLabelSmall(@"B:", NSMakeRect(x, y - 2, 16, 22))];
-    x += 20;
-    self.birthRangeView = [[GOLRangeSlider alloc] initWithFrame:NSMakeRect(x, y - 4, 180, 28)
-                                                       minValue:0
-                                                            max:8
-                                                     defaultMin:3
-                                                     defaultMax:3];
-    [bar addSubview:self.birthRangeView];
-    x += 188;
+    [bar addSubview:MakeLabelSmall(@"Rule", NSMakeRect(x, y, 35, 18))];
+    x += 40;
+    self.rulePopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(x, y - 2, 115, 24) pullsDown:NO];
+    {
+        int i;
+        for (i = 0; i < kFamousRuleCount; i++) {
+            NSString *title = [NSString stringWithUTF8String:kFamousRules[i].name];
+            if (title != nil) {
+                [self.rulePopup addItemWithTitle:title];
+            }
+        }
+        [self.rulePopup addItemWithTitle:@"Custom"];
+        [self.rulePopup selectItemAtIndex:0]; // Life
+        self.rulePopup.target = self;
+        self.rulePopup.action = @selector(rulePopupChanged:);
+    }
+    [bar addSubview:self.rulePopup];
+    x += 120;
 
-    [bar addSubview:MakeLabelSmall(@"S:", NSMakeRect(x, y - 2, 16, 22))];
-    x += 20;
-    self.survRangeView = [[GOLRangeSlider alloc] initWithFrame:NSMakeRect(x, y - 4, 180, 28)
-                                                      minValue:0
-                                                           max:8
-                                                    defaultMin:2
-                                                    defaultMax:3];
-    [bar addSubview:self.survRangeView];
-    x += 188;
+    self.ruleToggleView = [[GOLRuleToggleView alloc] initWithFrame:NSMakeRect(x, y - 6, 165, 34)];
+    [bar addSubview:self.ruleToggleView];
+    x += 170;
 
-    x += 8;
     self.ruleLabel = MakeLabel(@"B3/S23", NSMakeRect(x, y - 2, 120, 22));
     [bar addSubview:self.ruleLabel];
     x += 110;
@@ -1647,13 +1855,29 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     [bar addSubview:self.maxAgeLabel];
     x += 80;
 
+    [bar addSubview:MakeLabelSmall(@"Trend", NSMakeRect(x, y, 40, 18))];
+    x += 45;
+
+    self.popSpark = [[GOLSparklineView alloc] initWithFrame:NSMakeRect(x, y - 3, 120, 24)];
+    self.popSpark.toolTip = @"Population over recent generations";
+    [bar addSubview:self.popSpark];
+    x += 130;
+
+    self.glowButton = [[NSButton alloc] initWithFrame:NSMakeRect(x, y - 3, 54, 24)];
+    self.glowButton.title = @"Glow";
+    [self.glowButton setButtonType:NSButtonTypeSwitch];
+    self.glowButton.state = self.glowOn ? NSControlStateValueOn : NSControlStateValueOff;
+    self.glowButton.target = self;
+    self.glowButton.action = @selector(glowToggle:);
+    [bar addSubview:self.glowButton];
+
     y = 38;
     x = 12;
 
-    [bar addSubview:MakeLabelSmall(@"Density", NSMakeRect(x, y, 55, 18))];
-    x += 60;
+    [bar addSubview:MakeLabelSmall(@"Density", NSMakeRect(x, y, 50, 18))];
+    x += 55;
 
-    self.densitySlider = [[NSSlider alloc] initWithFrame:NSMakeRect(x, y - 3, 100, 20)];
+    self.densitySlider = [[NSSlider alloc] initWithFrame:NSMakeRect(x, y - 3, 90, 20)];
     self.densitySlider.minValue = 0.0;
     self.densitySlider.maxValue = 1.0;
     self.densitySlider.doubleValue = 0.2;
@@ -1663,16 +1887,16 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     self.densitySlider.target = self;
     self.densitySlider.action = @selector(sliderChanged:);
     [bar addSubview:self.densitySlider];
-    x += 110;
+    x += 95;
 
-    self.densityPct = MakeLabelSmall(@"20%", NSMakeRect(x, y, 35, 18));
+    self.densityPct = MakeLabelSmall(@"20%", NSMakeRect(x, y, 34, 18));
     [bar addSubview:self.densityPct];
-    x += 45;
+    x += 39;
 
-    [bar addSubview:MakeLabelSmall(@"Speed", NSMakeRect(x, y, 45, 18))];
-    x += 50;
+    [bar addSubview:MakeLabelSmall(@"Speed", NSMakeRect(x, y, 42, 18))];
+    x += 47;
 
-    self.speedSlider = [[NSSlider alloc] initWithFrame:NSMakeRect(x, y - 3, 120, 20)];
+    self.speedSlider = [[NSSlider alloc] initWithFrame:NSMakeRect(x, y - 3, 105, 20)];
     self.speedSlider.minValue = 1.0;
     self.speedSlider.maxValue = 120.0;
     self.speedSlider.doubleValue = 30.0;
@@ -1682,16 +1906,16 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     self.speedSlider.target = self;
     self.speedSlider.action = @selector(sliderChanged:);
     [bar addSubview:self.speedSlider];
-    x += 130;
+    x += 110;
 
-    self.speedLabel = MakeLabelSmall(@"30 gen/s", NSMakeRect(x, y, 65, 18));
+    self.speedLabel = MakeLabelSmall(@"30 gen/s", NSMakeRect(x, y, 60, 18));
     [bar addSubview:self.speedLabel];
-    x += 75;
+    x += 65;
 
-    [bar addSubview:MakeLabelSmall(@"Preset", NSMakeRect(x, y, 45, 18))];
-    x += 50;
+    [bar addSubview:MakeLabelSmall(@"Preset", NSMakeRect(x, y, 40, 18))];
+    x += 45;
 
-    presetsPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(x, y - 3, 120, 24)
+    presetsPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(x, y - 3, 110, 24)
                                                 pullsDown:NO];
     [presetsPopup addItemWithTitle:@"Glider"];
     [presetsPopup addItemWithTitle:@"Blinker"];
@@ -1702,32 +1926,42 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     [presetsPopup addItemWithTitle:@"LWSS"];
     [presetsPopup addItemWithTitle:@"R-Pentomino"];
     [presetsPopup addItemWithTitle:@"Heptomino"];
+    [presetsPopup addItemWithTitle:@"Pulsar"];
+    [presetsPopup addItemWithTitle:@"Acorn"];
     [presetsPopup setTarget:self];
     [presetsPopup setAction:@selector(rulePresetClicked:)];
     [bar addSubview:presetsPopup];
-    x += 130;
+    x += 115;
 
-    self.goButton = [[NSButton alloc] initWithFrame:NSMakeRect(x, y - 3, 65, 24)];
+    self.goButton = [[NSButton alloc] initWithFrame:NSMakeRect(x, y - 3, 52, 24)];
     self.goButton.title = @"Go";
     self.goButton.bezelStyle = NSBezelStyleRounded;
     self.goButton.target = self;
     self.goButton.action = @selector(goPause:);
     [bar addSubview:self.goButton];
+    x += 57;
+
+    randomButton = [[NSButton alloc] initWithFrame:NSMakeRect(x, y - 3, 70, 24)];
+    randomButton.title = @"Random";
+    randomButton.bezelStyle = NSBezelStyleRounded;
+    randomButton.target = self;
+    randomButton.action = @selector(randomize:);
+    [bar addSubview:randomButton];
     x += 75;
 
-    clearButton = [[NSButton alloc] initWithFrame:NSMakeRect(x, y - 3, 65, 24)];
+    clearButton = [[NSButton alloc] initWithFrame:NSMakeRect(x, y - 3, 58, 24)];
     clearButton.title = @"Clear";
     clearButton.bezelStyle = NSBezelStyleRounded;
     clearButton.target = self;
     clearButton.action = @selector(clear:);
     [bar addSubview:clearButton];
-    x += 75;
+    x += 63;
 
-    self.genLabel = MakeLabelSmall(@"Gen 0", NSMakeRect(x, y, 90, 18));
+    self.genLabel = MakeLabelSmall(@"Gen 0", NSMakeRect(x, y, 60, 18));
     [bar addSubview:self.genLabel];
-    x += 100;
+    x += 70;
 
-    self.hintLabel = MakeLabelSmall(@"L:add  R:erase", NSMakeRect(x, y, 220, 18));
+    self.hintLabel = MakeLabelSmall(@"L:add  R:erase", NSMakeRect(x, y, 105, 18));
     [bar addSubview:self.hintLabel];
 
     y = 68;
@@ -1745,6 +1979,21 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     self.displayPopup.target = self;
     self.displayPopup.action = @selector(displayChanged:);
     [bar addSubview:self.displayPopup];
+    x += 100;
+
+    [bar addSubview:MakeLabelSmall(@"Palette", NSMakeRect(x, y, 50, 18))];
+    x += 55;
+
+    self.palettePopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(x, y - 3, 90, 24)
+                                                      pullsDown:NO];
+    [self.palettePopup addItemWithTitle:@"Viridis"];
+    [self.palettePopup addItemWithTitle:@"Inferno"];
+    [self.palettePopup addItemWithTitle:@"Plasma"];
+    [self.palettePopup addItemWithTitle:@"Turbo"];
+    [self.palettePopup selectItemAtIndex:(int)self.palette];
+    self.palettePopup.target = self;
+    self.palettePopup.action = @selector(paletteChanged:);
+    [bar addSubview:self.palettePopup];
     x += 100;
 
     [bar addSubview:MakeLabelSmall(@"Tool", NSMakeRect(x, y, 35, 18))];
@@ -1795,20 +2044,18 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     [bar addSubview:fitButton];
     x += 60;
 
-    self.hoverLabel = MakeLabel(@"--", NSMakeRect(x, y, 180, 18));
+    self.hoverLabel = MakeLabel(@"--", NSMakeRect(x, y, 145, 18));
     [bar addSubview:self.hoverLabel];
 
     weakSelf = self;
-    self.birthRangeView.rangeChanged = ^{
+    self.ruleToggleView.toggleChanged = ^{
         App *strongSelf = weakSelf;
         if (strongSelf != nil) {
-            [strongSelf ruleSliderChanged:strongSelf];
-        }
-    };
-    self.survRangeView.rangeChanged = ^{
-        App *strongSelf = weakSelf;
-        if (strongSelf != nil) {
-            [strongSelf ruleSliderChanged:strongSelf];
+            GOLRules r = strongSelf.rules;
+            r.birth = strongSelf.ruleToggleView.birth;
+            r.survival = strongSelf.ruleToggleView.survival;
+            strongSelf.rules = r;
+            [strongSelf updateRuleUI];
         }
     };
 
@@ -1954,8 +2201,6 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     u->pad = 0;
     u->birth = r.birth;
     u->survival = r.survival;
-    u->pad2 = 0;
-    u->pad3 = 0;
     boundsW = self.mtkView.bounds.size.width;
     boundsH = self.mtkView.bounds.size.height;
     if (boundsW < 1.0) {
@@ -1974,7 +2219,8 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     u->viewWidth = (float)boundsW;
     u->viewHeight = (float)boundsH;
     u->displayMode = self.displayMode;
-    u->pad4 = 0;
+    u->palette = self.palette;
+    u->glow = self.glowOn ? 1.0f : 0.0f;
 
     if (self.running) {
         genPerSec = self.speedSlider ? self.speedSlider.doubleValue : 30.0;
@@ -2130,6 +2376,9 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     }
     if (self.maxAgeLabel != nil) {
         self.maxAgeLabel.stringValue = [NSString stringWithFormat:@"MaxAge: %d", maxAge];
+    }
+    if (self.popSpark != nil) {
+        [self.popSpark pushValue:alive];
     }
 
     self.fpsFrames = self.fpsFrames + 1u;

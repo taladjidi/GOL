@@ -6,8 +6,8 @@
 #include <stddef.h>
 
 typedef struct {
-    uint8_t birth;      // bitmask: bit n set if birth on n neighbors
-    uint8_t survival;   // bitmask: bit n set if survive on n neighbors
+    uint16_t birth;     // bitmask: bit n set if birth on n neighbors (0..8)
+    uint16_t survival;  // bitmask: bit n set if survive on n neighbors (0..8)
 } GOLRules;
 
 // Cell bit packing: bit 0 = alive, bits 1..15 = age (0..32767)

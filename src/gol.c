@@ -199,13 +199,99 @@ static void place_heptomino(uint16_t *cells, int w, int h, int cx, int cy) {
     gol_set_plane(cells, w, h, cx + 6, cy, true);
 }
 
+// Minimal Life RLE decoder. Decodes into `cells` (assumed pre-cleared),
+// centering the pattern's bounding box in the w x h grid. Mirrors the
+// centering used by tests/refstep.h so the two agree cell-for-cell.
+static void gol_decode_rle(uint16_t *cells, int w, int h, const char *rle) {
+    const char *p;
+    int x = 0;
+    int y = 0;
+    int count = 0;
+    bool have_count = false;
+    int max_x = 0;
+    int max_y = 0;
+    int ox;
+    int oy;
+
+    for (p = rle; *p; p++) {
+        char c = *p;
+        if (c >= '0' && c <= '9') {
+            count = have_count ? count * 10 + (c - '0') : (c - '0');
+            have_count = true;
+        } else if (c == 'o' || c == 'b') {
+            int n = have_count ? count : 1;
+            x += n;
+            if (x > max_x) max_x = x;
+            if (y + 1 > max_y) max_y = y + 1;
+            count = 0;
+            have_count = false;
+        } else if (c == '$') {
+            int n = have_count ? count : 1;
+            y += n;
+            x = 0;
+            if (y > max_y) max_y = y;
+            count = 0;
+            have_count = false;
+        } else if (c == '!') {
+            break;
+        } else {
+            count = 0;
+            have_count = false;
+        }
+    }
+
+    ox = w / 2 - max_x / 2;
+    oy = h / 2 - max_y / 2;
+
+    x = 0;
+    y = 0;
+    count = 0;
+    have_count = false;
+    for (p = rle; *p; p++) {
+        char c = *p;
+        if (c >= '0' && c <= '9') {
+            count = have_count ? count * 10 + (c - '0') : (c - '0');
+            have_count = true;
+        } else if (c == 'o') {
+            int n = have_count ? count : 1;
+            for (int i = 0; i < n; i++) {
+                gol_set_plane(cells, w, h, ox + x + i, oy + y, true);
+            }
+            x += n;
+            count = 0;
+            have_count = false;
+        } else if (c == 'b') {
+            int n = have_count ? count : 1;
+            x += n;
+            count = 0;
+            have_count = false;
+        } else if (c == '$') {
+            int n = have_count ? count : 1;
+            y += n;
+            x = 0;
+            count = 0;
+            have_count = false;
+        } else if (c == '!') {
+            break;
+        } else {
+            count = 0;
+            have_count = false;
+        }
+    }
+}
+
+static const char kPulsarRLE[] =
+    "2b3o3b3o2b2$o4bobo4bo$o4bobo4bo$o4bobo4bo$2b3o3b3o2b2$"
+    "2b3o3b3o2b$o4bobo4bo$o4bobo4bo$o4bobo4bo2$2b3o3b3o!";
+static const char kAcornRLE[] = "bobb$obob$4o!";
+
 void gol_apply_preset(uint16_t *cells, int w, int h, const char *preset) {
     int cx;
     int cy;
     memset(cells, 0, (size_t)w * (size_t)h * sizeof(uint16_t));
     cx = w / 2;
     cy = h / 2;
-    
+
     if (strcmp(preset, "glider") == 0) {
         place_glider(cells, w, h, cx - 1, cy - 1);
     } else if (strcmp(preset, "blinker") == 0) {
@@ -224,6 +310,10 @@ void gol_apply_preset(uint16_t *cells, int w, int h, const char *preset) {
         place_r_pentomino(cells, w, h, cx - 1, cy - 1);
     } else if (strcmp(preset, "heptomino") == 0) {
         place_heptomino(cells, w, h, cx - 3, cy);
+    } else if (strcmp(preset, "pulsar") == 0) {
+        gol_decode_rle(cells, w, h, kPulsarRLE);
+    } else if (strcmp(preset, "acorn") == 0) {
+        gol_decode_rle(cells, w, h, kAcornRLE);
     }
 }
 

@@ -17,10 +17,8 @@ typedef struct {
     uint32_t gridH;
     uint32_t curOffset;
     uint32_t pad;
-    uint8_t birth;
-    uint8_t survival;
-    uint8_t pad2;
-    uint8_t pad3;
+    uint16_t birth;
+    uint16_t survival;
     float viewScaleX;
     float viewScaleY;
     float viewOffsetX;
@@ -28,7 +26,8 @@ typedef struct {
     float viewWidth;
     float viewHeight;
     uint32_t displayMode;
-    uint32_t pad4;
+    uint32_t palette;
+    float glow;
 } Uniforms;
 
 static MTLSize MakeSize(int w, int h, int d) {
@@ -169,8 +168,8 @@ int main(int argc, char *argv[]) {
                     u.gridW = (uint32_t)w;
                     u.gridH = (uint32_t)h;
                     u.curOffset = 0;
-                    u.birth = (uint8_t)rules[ri].birth;
-                    u.survival = (uint8_t)rules[ri].survival;
+                    u.birth = rules[ri].birth;
+                    u.survival = rules[ri].survival;
                     memcpy([uniBuf contents], &u, sizeof(u));
 
                     for (int step = 0; step < 6; step++) {

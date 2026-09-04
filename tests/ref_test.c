@@ -20,6 +20,7 @@
 #define RLE_LWSS "bo2bo$o4b$o3bo$4o!"
 #define RLE_R_PENTOMINO "b2o$2ob$bo!"
 #define RLE_HEPTOMINO "7o!"
+#define RLE_ACORN "bobb$obob$4o!"
 
 static void ref_decode_rle(RefGrid *g, const char *rle, int ox, int oy, int *pw, int *ph) {
     int x = 0;
@@ -231,18 +232,22 @@ static void test_cpu_matches_ref(void) {
 typedef struct {
     const char *name;
     const char *rle;
+    int expected_pop;
+    int pad; // explicit: keeps 8-byte alignment without implicit padding
 } PresetCase;
 
 static const PresetCase preset_cases[] = {
-    { "block", RLE_BLOCK },
-    { "blinker", RLE_BLINKER },
-    { "toad", RLE_TOAD },
-    { "beacon", RLE_BEACON },
-    { "glider", RLE_GLIDER },
-    { "pentadecathlon", RLE_PENTADECATHLON },
-    { "lwss", RLE_LWSS },
-    { "r-pentomino", RLE_R_PENTOMINO },
-    { "heptomino", RLE_HEPTOMINO }
+    { "block", RLE_BLOCK, 4, 0 },
+    { "blinker", RLE_BLINKER, 3, 0 },
+    { "toad", RLE_TOAD, 6, 0 },
+    { "beacon", RLE_BEACON, 6, 0 },
+    { "glider", RLE_GLIDER, 5, 0 },
+    { "pentadecathlon", RLE_PENTADECATHLON, 12, 0 },
+    { "lwss", RLE_LWSS, 9, 0 },
+    { "r-pentomino", RLE_R_PENTOMINO, 5, 0 },
+    { "heptomino", RLE_HEPTOMINO, 7, 0 },
+    { "pulsar", RLE_PULSAR, 48, 0 },
+    { "acorn", RLE_ACORN, 7, 0 }
 };
 
 static void cpu_to_ref(const uint16_t *cells, int w, int h, RefGrid *g) {
@@ -274,6 +279,12 @@ static void test_presets_match_rle(void) {
         gol_apply_preset(cells, GRID_W, GRID_H, preset_cases[i].name);
         cpu_to_ref(cells, GRID_W, GRID_H, &actual);
         ref_place_rle(&expected, preset_cases[i].rle);
+
+        if (ref_count(&actual) != preset_cases[i].expected_pop) {
+            printf("  POP MISMATCH preset=%s got=%d want=%d\n",
+                   preset_cases[i].name, ref_count(&actual), preset_cases[i].expected_pop);
+            assert(false);
+        }
 
         if (!ref_equal(&actual, &expected)) {
             printf("  MISMATCH preset=%s\n", preset_cases[i].name);
