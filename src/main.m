@@ -443,6 +443,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
 @property (nonatomic, strong) id<MTLCommandBuffer> lastCB;
 @property (nonatomic, assign) uint64_t frameIndex;
 @property (nonatomic, assign) uint32_t displayPlane;
+@property (nonatomic, assign) uint32_t completedPlane;
 @property (nonatomic, assign) int gridW;
 @property (nonatomic, assign) int gridH;
 @property (nonatomic, assign) int maxGridW;
@@ -673,6 +674,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
 @synthesize lastCB = _lastCB;
 @synthesize frameIndex = _frameIndex;
 @synthesize displayPlane = _displayPlane;
+@synthesize completedPlane = _completedPlane;
 @synthesize gridW = _gridW;
 @synthesize gridH = _gridH;
 @synthesize maxGridW = _maxGridW;
@@ -794,6 +796,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     now = CFAbsoluteTimeGetCurrent();
     self.frameIndex = 0;
     self.displayPlane = 0;
+    self.completedPlane = 0;
     self.gridW = INITIAL_GRID_W;
     self.gridH = INITIAL_GRID_H;
     self.gen = 0;
@@ -1037,6 +1040,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     [self waitAll];
     self.frameIndex = 0;
     self.displayPlane = 0;
+    self.completedPlane = 0;
     self.gen = 0;
     cells = [self currentCells];
     if (cells == nil) {
@@ -1119,6 +1123,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     [self waitAll];
     self.frameIndex = 0;
     self.displayPlane = 0;
+    self.completedPlane = 0;
     self.gen = 0;
     self.genAccum = 0;
     [self clearTrailNow];
@@ -1176,6 +1181,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     [self waitAll];
     self.frameIndex = 0;
     self.displayPlane = 0;
+    self.completedPlane = 0;
     self.gen = 0;
     self.genAccum = 0;
     [self clearTrailNow];
@@ -1276,6 +1282,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     if (bounds.size.width < 1.0 || bounds.size.height < 1.0) {
         return;
     }
+    [self waitAll];
 
     // Bounding box of the live cells in the currently displayed plane.
     dMinCol = self.gridW;
@@ -1534,7 +1541,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
         self.hoverLabel.stringValue = @"--";
         return;
     }
-    cells = [self planePointer:self.displayPlane];
+    cells = [self planePointer:self.completedPlane];
     if (cells == nil) {
         self.hoverLabel.stringValue = @"--";
         return;
@@ -1749,6 +1756,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
 
     self.frameIndex = 0;
     self.displayPlane = 0;
+    self.completedPlane = 0;
     [self rebuildCellTexture];
     [self clearTrailNow];
     [self markDirty];
@@ -2290,6 +2298,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
                 [enc endEncoding];
                 renderPlane = writePlane;
                 self.displayPlane = writePlane;
+                self.completedPlane = curPlane;
                 willStep = YES;
                 [self setCB:cb at:writePlane];
             }
@@ -2301,6 +2310,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
                 gol_step_cpu(cur, write, self.gridW, self.gridH, r);
                 renderPlane = writePlane;
                 self.displayPlane = writePlane;
+                self.completedPlane = writePlane;
                 willStep = YES;
             }
         }
@@ -2392,20 +2402,22 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
         self.genLabel.stringValue = [NSString stringWithFormat:@"Gen %u", self.gen];
     }
 
-    cells = [self currentCells];
-    alive = 0;
-    maxAge = 0;
-    if (cells != nil) {
-        gol_count_alive(cells, self.gridW, self.gridH, &alive, &maxAge);
-    }
-    if (self.popLabel != nil) {
-        self.popLabel.stringValue = [NSString stringWithFormat:@"Pop: %d", alive];
-    }
-    if (self.maxAgeLabel != nil) {
-        self.maxAgeLabel.stringValue = [NSString stringWithFormat:@"MaxAge: %d", maxAge];
-    }
-    if (self.popSpark != nil) {
-        [self.popSpark pushValue:alive];
+    if (willStep) {
+        cells = [self planePointer:self.completedPlane];
+        alive = 0;
+        maxAge = 0;
+        if (cells != nil) {
+            gol_count_alive(cells, self.gridW, self.gridH, &alive, &maxAge);
+        }
+        if (self.popLabel != nil) {
+            self.popLabel.stringValue = [NSString stringWithFormat:@"Pop: %d", alive];
+        }
+        if (self.maxAgeLabel != nil) {
+            self.maxAgeLabel.stringValue = [NSString stringWithFormat:@"MaxAge: %d", maxAge];
+        }
+        if (self.popSpark != nil) {
+            [self.popSpark pushValue:alive];
+        }
     }
 
     self.fpsFrames = self.fpsFrames + 1u;
