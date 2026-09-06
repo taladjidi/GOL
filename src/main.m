@@ -2295,10 +2295,6 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
         return;
     }
 
-    drawable = self.mtkView.currentDrawable;
-    if (drawable == nil) {
-        return;
-    }
     cb = [self.queue commandBuffer];
     if (cb == nil) {
         return;
@@ -2417,6 +2413,20 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
                    forGeneration:self.gen + 1u];
             }
         }
+    }
+
+    // Skip idle frames: no step this frame and nothing painted since the last
+    // encode, so there is nothing new to draw. Return before touching the
+    // drawable or any render pass. The accumulator above keeps ticking, so the
+    // next step still fires on time; lastCB and the FPS counter below are only
+    // reached when a frame is actually presented.
+    if (!willStep && !self.dirty) {
+        return;
+    }
+
+    drawable = self.mtkView.currentDrawable;
+    if (drawable == nil) {
+        return;
     }
 
     u->curOffset = (uint32_t)renderPlane * (uint32_t)self.planeCells;
