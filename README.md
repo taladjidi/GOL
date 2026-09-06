@@ -120,7 +120,8 @@ Example:
 - **Trend**: a live sparkline of population over recent generations.
 - **Glow**: toggle the additive glow / bloom effect.
 - **Density**: fill probability used by Randomize (default 20%).
-- **Speed**: generations per second, 1-120 (default 30).
+- **Speed**: generations per second, 1-600 (default 30). At high rates several
+  generations run per frame, so the maximum is no longer bound by refresh rate.
 - **Preset**: drop-down of classic patterns; applying one clears the grid and
   places the pattern.
 - **Go / Random / Clear**: run/pause, seed a random soup, and wipe the grid.

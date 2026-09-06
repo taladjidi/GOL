@@ -2010,10 +2010,10 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
 
     self.speedSlider = [[NSSlider alloc] initWithFrame:NSMakeRect(x, y - 3, 105, 20)];
     self.speedSlider.minValue = 1.0;
-    self.speedSlider.maxValue = 120.0;
+    self.speedSlider.maxValue = 600.0;
     self.speedSlider.doubleValue = 30.0;
     self.speedSlider.allowsTickMarkValuesOnly = NO;
-    self.speedSlider.numberOfTickMarks = 6;
+    self.speedSlider.numberOfTickMarks = 7;
     self.speedSlider.continuous = YES;
     self.speedSlider.target = self;
     self.speedSlider.action = @selector(sliderChanged:);
@@ -2249,11 +2249,15 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     CGFloat boundsH;
     double genPerSec;
     double genInterval;
-    int gensToAdvance;
+    int gensToAdvance = 0;
     id<MTLCommandBuffer> oldest;
     BOOL oldestDone;
-    NSUInteger curByte;
-    NSUInteger writeByte;
+    uint32_t planeA;
+    uint32_t planeB;
+    uint32_t readPlane;
+    uint32_t wp;
+    uint32_t plane;
+    int stepIdx;
     NSUInteger tgW;
     NSUInteger tgH;
     NSUInteger gx;
@@ -2347,42 +2351,64 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
         gensToAdvance = GOL_MIN(gensToAdvance, 5);
         self.genAccum -= (double)gensToAdvance * genInterval;
 
-        if (gensToAdvance > 0) {
-            gensToAdvance = 1;
-        }
-
         if (gensToAdvance > 0 && self.stepPipeline != nil) {
+            // Each dispatch advances the data by one plane (cur -> A -> B ->
+            // cur ...), so after N steps the latest generation sits on
+            // (curPlane + N) % 3, keeping displayPlane == frameIndex % 3.
+            planeA = (curPlane + 1) % (uint32_t)PLANE_COUNT;
+            planeB = (curPlane + 2) % (uint32_t)PLANE_COUNT;
+            // The buffer touches every plane, so all three ring slots must be
+            // done before we may reuse them.
             oldest = [self cbAt:slot];
             oldestDone = (oldest == nil) ||
                           oldest.status == MTLCommandBufferStatusCompleted ||
                           oldest.status == MTLCommandBufferStatusError;
             if (oldestDone) {
-                // The step also writes the stats slot of the write plane, so
-                // that plane's last command buffer must be done too.
-                writePlane = (curPlane + 1) % (uint32_t)PLANE_COUNT;
-                oldest = [self cbAt:writePlane];
+                oldest = [self cbAt:planeA];
+                oldestDone = (oldest == nil) ||
+                              oldest.status == MTLCommandBufferStatusCompleted ||
+                              oldest.status == MTLCommandBufferStatusError;
+            }
+            if (oldestDone) {
+                oldest = [self cbAt:planeB];
                 oldestDone = (oldest == nil) ||
                               oldest.status == MTLCommandBufferStatusCompleted ||
                               oldest.status == MTLCommandBufferStatusError;
             }
             if (oldestDone) {
                 s = (GOLStats *)[self.statsBuf contents];
-                memset(&s[writePlane], 0, sizeof(GOLStats));
-                curByte = (NSUInteger)curPlane * self.planeBytes;
-                writeByte = (NSUInteger)writePlane * self.planeBytes;
+                for (plane = 0; plane < (uint32_t)PLANE_COUNT; plane++) {
+                    memset(&s[plane], 0, sizeof(GOLStats));
+                }
                 tgW = 16;
                 tgH = 16;
                 gx = ((NSUInteger)self.gridW + tgW - 1) / tgW;
                 gy = ((NSUInteger)self.gridH + tgH - 1) / tgH;
                 enc = [cb computeCommandEncoder];
                 [enc setComputePipelineState:self.stepPipeline];
-                [enc setBuffer:self.gridBuf offset:curByte atIndex:0];
-                [enc setBuffer:self.gridBuf offset:writeByte atIndex:1];
-                [enc setBuffer:self.uniformsBuf offset:0 atIndex:2];
-                [enc setBuffer:self.statsBuf offset:writePlane * sizeof(GOLStats) atIndex:3];
-                [enc dispatchThreadgroups:MakeSize((int)gx, (int)gy, 1)
-                  threadsPerThreadgroup:MakeSize((int)tgW, (int)tgH, 1)];
+                for (stepIdx = 1; stepIdx <= gensToAdvance; stepIdx++) {
+                    readPlane = (curPlane + (uint32_t)(stepIdx - 1)) %
+                                (uint32_t)PLANE_COUNT;
+                    wp = (curPlane + (uint32_t)stepIdx) % (uint32_t)PLANE_COUNT;
+                    [enc setBuffer:self.gridBuf
+                           offset:(NSUInteger)readPlane * self.planeBytes
+                          atIndex:0];
+                    [enc setBuffer:self.gridBuf
+                           offset:(NSUInteger)wp * self.planeBytes
+                          atIndex:1];
+                    [enc setBuffer:self.uniformsBuf offset:0 atIndex:2];
+                    [enc setBuffer:self.statsBuf
+                           offset:wp * sizeof(GOLStats)
+                          atIndex:3];
+                    [enc dispatchThreadgroups:MakeSize((int)gx, (int)gy, 1)
+                      threadsPerThreadgroup:MakeSize((int)tgW, (int)tgH, 1)];
+                    if (stepIdx < gensToAdvance) {
+                        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+                    }
+                }
                 [enc endEncoding];
+                writePlane = (curPlane + (uint32_t)gensToAdvance) %
+                             (uint32_t)PLANE_COUNT;
                 renderPlane = writePlane;
                 self.displayPlane = writePlane;
                 self.completedPlane = curPlane;
@@ -2390,24 +2416,30 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
                 [self setCB:cb at:writePlane];
             }
         } else if (gensToAdvance > 0) {
-            writePlane = (curPlane + 1) % (uint32_t)PLANE_COUNT;
-            cur = [self planePointer:curPlane];
-            write = [self planePointer:writePlane];
-            if (cur != nil && write != nil) {
-                gol_step_cpu(cur, write, self.gridW, self.gridH, r);
-                renderPlane = writePlane;
-                self.displayPlane = writePlane;
-                self.completedPlane = writePlane;
-                willStep = YES;
-                cells = [self planePointer:writePlane];
-                alive = 0;
-                maxAge = 0;
-                if (cells != nil) {
-                    gol_count_alive(cells, self.gridW, self.gridH, &alive, &maxAge);
+            for (stepIdx = 1; stepIdx <= gensToAdvance; stepIdx++) {
+                readPlane = (curPlane + (uint32_t)(stepIdx - 1)) %
+                            (uint32_t)PLANE_COUNT;
+                wp = (curPlane + (uint32_t)stepIdx) % (uint32_t)PLANE_COUNT;
+                cur = [self planePointer:readPlane];
+                write = [self planePointer:wp];
+                if (cur != nil && write != nil) {
+                    gol_step_cpu(cur, write, self.gridW, self.gridH, r);
                 }
-                [self setPopulation:(uint32_t)alive maxAge:(uint32_t)maxAge
-                   forGeneration:self.gen + 1u];
             }
+            writePlane = (curPlane + (uint32_t)gensToAdvance) %
+                         (uint32_t)PLANE_COUNT;
+            renderPlane = writePlane;
+            self.displayPlane = writePlane;
+            self.completedPlane = writePlane;
+            willStep = YES;
+            cells = [self planePointer:writePlane];
+            alive = 0;
+            maxAge = 0;
+            if (cells != nil) {
+                gol_count_alive(cells, self.gridW, self.gridH, &alive, &maxAge);
+            }
+            [self setPopulation:(uint32_t)alive maxAge:(uint32_t)maxAge
+               forGeneration:self.gen + (uint32_t)gensToAdvance];
         }
     }
 
@@ -2492,9 +2524,9 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
 
     [cb presentDrawable:drawable];
     if (willStep && self.stepPipeline != nil) {
-        // The step kernel wrote the stats slot of writePlane; read it back once
-        // the buffer completes and apply it on the main queue.
-        stepGen = self.gen + 1u;
+        // The last dispatch wrote the stats slot of writePlane; read it back
+        // once the buffer completes and apply it on the main queue.
+        stepGen = self.gen + (uint32_t)gensToAdvance;
         weakSelf = self;
         [cb addCompletedHandler:^(id<MTLCommandBuffer> completedBuffer) {
             App *strongSelf;
@@ -2526,8 +2558,8 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     [cb commit];
 
     if (willStep) {
-        self.frameIndex = f + 1u;
-        self.gen = self.gen + 1u;
+        self.frameIndex = f + (uint64_t)gensToAdvance;
+        self.gen = self.gen + (uint32_t)gensToAdvance;
     }
     if (needCell && self.cellTex != nil) {
         self.dirty = NO;
