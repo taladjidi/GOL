@@ -185,13 +185,22 @@ constexpr sampler s_linear(filter::linear, address::clamp_to_edge);
         // Multiple cells per pixel: linear filtering keeps shrunken patterns smooth.
         float2 tcoordF = (float2(icell) + 0.5f) /
             float2(static_cast<float>(u.gridW), static_cast<float>(u.gridH));
-        sample = (u.displayMode == kDisplayTrails) ? trail.sample(s_linear, tcoordF) :
-                                                         tex.sample(s_linear, tcoordF);
+        if (u.displayMode == kDisplayTrails) {
+            float t = trail.sample(s_linear, tcoordF).r;
+            sample = float4(Ramp(t, u.palette), t);
+        } else {
+            sample = tex.sample(s_linear, tcoordF);
+        }
         float3 col = bg.rgb * (1.0f - sample.a) + sample.rgb;
         col += sample.rgb * u.glow * 0.3f;
         return float4(col, 1.0f);
     }
-    sample = (u.displayMode == kDisplayTrails) ? trail.read(tcoord, 0) : tex.read(tcoord, 0);
+    if (u.displayMode == kDisplayTrails) {
+        float t = trail.read(tcoord, 0).r;
+        sample = float4(Ramp(t, u.palette), t);
+    } else {
+        sample = tex.read(tcoord, 0);
+    }
     // Soft edge: keep a small gap, then fade the cell over ~1px near its border
     // instead of a hard cut, so cells look rounded rather than aliased squares.
     const float gap = 0.16f;
@@ -276,18 +285,17 @@ constexpr sampler s_linear(filter::linear, address::clamp_to_edge);
     }
 }
 
-// Fades the persistent trail texture and adds the current cell color.
+// Fades the persistent trail intensity and records the current cell's liveness.
 [[kernel]] void trail_step(texture2d<float, access::read> cell [[texture(0)]],
                            texture2d<float, access::read> trailRead [[texture(1)]],
                            texture2d<float, access::write> trailWrite [[texture(2)]],
                            uint2 gid [[thread_position_in_grid]]) {
     uint2 size = uint2(trailWrite.get_width(), trailWrite.get_height());
     if (gid.x >= size.x || gid.y >= size.y) return;
-    float3 old = trailRead.read(gid).rgb * 0.94f;
-    float4 cur = cell.read(gid);
-    float3 added = cur.rgb * cur.a;
-    float3 out = max(old, added);
-    trailWrite.write(float4(out, 1.0f), gid);
+    float old = trailRead.read(gid).r * 0.94f;
+    float cur = cell.read(gid).a;
+    float out = max(old, cur);
+    trailWrite.write(float4(out, 0.0f, 0.0f, 1.0f), gid);
 }
 
 // Zeroes the persistent trail texture.

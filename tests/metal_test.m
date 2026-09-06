@@ -2,6 +2,7 @@
 #import <Metal/Metal.h>
 
 #include <assert.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -265,6 +266,158 @@ int main(int argc, char *argv[]) {
                     ref_grid_free(&ref);
                 }
             }
+        }
+
+        {
+            id<MTLFunction> trailStepFunc;
+            id<MTLFunction> trailClearFunc;
+            id<MTLComputePipelineState> trailStepPipeline;
+            id<MTLComputePipelineState> trailClearPipeline;
+            MTLTextureDescriptor *cellDesc;
+            MTLTextureDescriptor *trailDesc;
+            id<MTLTexture> cellTex;
+            id<MTLTexture> trailTex;
+            id<MTLBuffer> readBuf;
+            NSUInteger tw;
+            NSUInteger th;
+            NSUInteger bytesPerRow;
+            uint8_t *pixels;
+            uint8_t *readback;
+            int step;
+
+            tw = 4;
+            th = 4;
+            bytesPerRow = (NSUInteger)(tw * 2);
+
+            trailStepFunc = [library newFunctionWithName:@"trail_step"];
+            if (!trailStepFunc) {
+                fprintf(stderr, "failed to find trail_step function\n");
+                return 1;
+            }
+            trailClearFunc = [library newFunctionWithName:@"trail_clear"];
+            if (!trailClearFunc) {
+                fprintf(stderr, "failed to find trail_clear function\n");
+                return 1;
+            }
+            error = nil;
+            trailStepPipeline = [device newComputePipelineStateWithFunction:trailStepFunc error:&error];
+            if (!trailStepPipeline) {
+                fprintf(stderr, "failed to create trail_step pipeline: %s\n",
+                        error.localizedDescription.UTF8String);
+                return 1;
+            }
+            error = nil;
+            trailClearPipeline = [device newComputePipelineStateWithFunction:trailClearFunc error:&error];
+            if (!trailClearPipeline) {
+                fprintf(stderr, "failed to create trail_clear pipeline: %s\n",
+                        error.localizedDescription.UTF8String);
+                return 1;
+            }
+
+            cellDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                            width:tw
+                                                                           height:th
+                                                                        mipmapped:NO];
+            cellDesc.usage = MTLTextureUsageShaderRead;
+            cellDesc.storageMode = MTLStorageModeShared;
+            cellTex = [device newTextureWithDescriptor:cellDesc];
+
+            trailDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR16Unorm
+                                                                             width:tw
+                                                                            height:th
+                                                                         mipmapped:NO];
+            trailDesc.usage = (MTLTextureUsage)(MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite);
+            trailDesc.storageMode = MTLStorageModePrivate;
+            trailTex = [device newTextureWithDescriptor:trailDesc];
+
+            readBuf = [device newBufferWithLength:bytesPerRow * th options:MTLResourceStorageModeShared];
+            assert(cellTex != nil && trailTex != nil && readBuf != nil);
+
+            pixels = (uint8_t *)calloc((size_t)tw * th, 4);
+            assert(pixels != NULL);
+
+            {
+                id<MTLCommandBuffer> cb = [queue commandBuffer];
+                id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+                [enc setComputePipelineState:trailClearPipeline];
+                [enc setTexture:trailTex atIndex:0];
+                [enc dispatchThreadgroups:MakeSize((int)tw, (int)th, 1)
+                  threadsPerThreadgroup:MakeSize(1, 1, 1)];
+                [enc endEncoding];
+                [cb commit];
+                [cb waitUntilCompleted];
+                if (cb.error) {
+                    fprintf(stderr, "trail_clear error: %s\n", cb.error.localizedDescription.UTF8String);
+                    return 1;
+                }
+            }
+
+            for (step = 1; step <= 2; step++) {
+                id<MTLCommandBuffer> cb;
+                id<MTLComputeCommandEncoder> enc;
+                id<MTLBlitCommandEncoder> blit;
+                uint16_t raw;
+                float value;
+                float expected;
+                float tol;
+
+                memset(pixels, 0, (size_t)tw * th * 4);
+                if (step == 1) {
+                    pixels[0] = 0;
+                    pixels[1] = 0;
+                    pixels[2] = 255;
+                    pixels[3] = 255;
+                }
+                [cellTex replaceRegion:MTLRegionMake2D(0, 0, tw, th)
+                          mipmapLevel:0
+                           withBytes:pixels
+                       bytesPerRow:(tw * 4)];
+
+                cb = [queue commandBuffer];
+                assert(cb != nil);
+                enc = [cb computeCommandEncoder];
+                assert(enc != nil);
+                [enc setComputePipelineState:trailStepPipeline];
+                [enc setTexture:cellTex atIndex:0];
+                [enc setTexture:trailTex atIndex:1];
+                [enc setTexture:trailTex atIndex:2];
+                [enc dispatchThreadgroups:MakeSize((int)tw, (int)th, 1)
+                  threadsPerThreadgroup:MakeSize(1, 1, 1)];
+                [enc endEncoding];
+
+                blit = [cb blitCommandEncoder];
+                assert(blit != nil);
+                [blit copyFromTexture:trailTex
+                         sourceSlice:0
+                        sourceLevel:0
+                     sourceOrigin:MTLOriginMake(0, 0, 0)
+                     sourceSize:MTLSizeMake(tw, th, 1)
+                         toBuffer:readBuf
+                destinationOffset:0
+         destinationBytesPerRow:bytesPerRow
+       destinationBytesPerImage:bytesPerRow * th];
+                [blit endEncoding];
+
+                [cb commit];
+                [cb waitUntilCompleted];
+                if (cb.error) {
+                    fprintf(stderr, "trail_step error: %s\n", cb.error.localizedDescription.UTF8String);
+                    return 1;
+                }
+
+                readback = (uint8_t *)[readBuf contents];
+                raw = (uint16_t)(readback[0] | (readback[1] << 8));
+                value = (float)raw / 65535.0f;
+                expected = (step == 1) ? 1.0f : 0.94f;
+                tol = 2.0f / 65535.0f;
+                if (fabsf(value - expected) > tol) {
+                    fprintf(stderr, "trail_step mismatch step=%d value=%.6f expected=%.6f\n",
+                            step, (double)value, (double)expected);
+                    return 1;
+                }
+            }
+
+            free(pixels);
         }
 
         printf("All Metal tests passed!\n");

@@ -40,21 +40,18 @@ static const int VIEW_H = (int)(INITIAL_GRID_H * CELL_PX);
 static const int BAR_H = 120;
 static const int RENDER_SCALE = 1;
 static const int PLANE_COUNT = 3;
-// Total simulation memory budget: the shared grid buffer, the CPU resize
-// scratch plane, and the cell + trail textures together. The maximum grid size
-// is derived from this in setupMetal, so a deep zoom-out grows the grid until
-// it would exceed the budget.
+// Total simulation memory budget: the shared grid buffer and the cell + trail
+// textures together. The maximum grid size is derived from this in setupMetal,
+// so a deep zoom-out grows the grid until it would exceed the budget.
 static const NSUInteger MAX_TOTAL_MEMORY = 1024u * 1024u * 1024u; // 1 GiB
 // Peak per-cell footprint in bytes when the grid is at its maximum size:
-//   gridBuf   PLANE_COUNT * sizeof(uint16_t)   (3 planes, shared)
-//   resizeTmp sizeof(uint16_t)                 (1 CPU scratch plane)
-//   cellTex   4 * RENDER_SCALE^2               (BGRA8Unorm)
-//   trailTex  8 * RENDER_SCALE^2               (RGBA16Float)
+//   gridBuf  PLANE_COUNT * sizeof(uint16_t)  (3 planes, shared)
+//   cellTex  4 * RENDER_SCALE^2              (BGRA8Unorm)
+//   trailTex 2 * RENDER_SCALE^2              (R16Unorm intensity)
 static const NSUInteger BYTES_PER_CELL =
     PLANE_COUNT * (NSUInteger)sizeof(uint16_t) +
-    (NSUInteger)sizeof(uint16_t) +
     4u * (NSUInteger)(RENDER_SCALE * RENDER_SCALE) +
-    8u * (NSUInteger)(RENDER_SCALE * RENDER_SCALE);
+    2u * (NSUInteger)(RENDER_SCALE * RENDER_SCALE);
 static const int MAX_TEXTURE_SIZE = 16384;
 static const uint32_t DISPLAY_AGE = 0u;
 static const uint32_t DISPLAY_TRAILS = 1u;
@@ -460,7 +457,6 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
 @property (nonatomic, assign) int maxGridH;
 @property (nonatomic, assign) NSUInteger planeCells;
 @property (nonatomic, assign) NSUInteger planeBytes;
-@property (nonatomic, assign) uint16_t *resizeTmp;
 @property (nonatomic, assign) BOOL running;
 @property (nonatomic, assign) BOOL dirty;
 @property (nonatomic, assign) BOOL needsGridResize;
@@ -695,7 +691,6 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
 @synthesize maxGridH = _maxGridH;
 @synthesize planeCells = _planeCells;
 @synthesize planeBytes = _planeBytes;
-@synthesize resizeTmp = _resizeTmp;
 @synthesize running = _running;
 @synthesize dirty = _dirty;
 @synthesize needsGridResize = _needsGridResize;
@@ -921,10 +916,6 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     }
     self.planeCells = ((need + 7) / 8) * 8;
     self.planeBytes = self.planeCells * sizeof(uint16_t);
-    self.resizeTmp = (uint16_t *)malloc(self.planeBytes);
-    if (self.resizeTmp == nil) {
-        return NO;
-    }
 
     self.gridBuf = [self.device newBufferWithLength:(NSUInteger)PLANE_COUNT * self.planeBytes
                                             options:MTLResourceStorageModeShared];
@@ -1774,6 +1765,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     int srcY;
     uint16_t *base;
     uint16_t *oldPlane;
+    uint16_t *scratchPlane;
     uint32_t p;
     uint16_t *cells;
     int alive;
@@ -1781,7 +1773,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
 
     (void)pixelSize;
     self.needsGridResize = NO;
-    if (self.gridBuf == nil || self.mtkView == nil || self.resizeTmp == nil ||
+    if (self.gridBuf == nil || self.mtkView == nil ||
         self.cellPx < 0.01) {
         return;
     }
@@ -1815,15 +1807,19 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     srcY = FloorInt(-self.viewOffsetY / (double)self.cellPx);
     base = (uint16_t *)[self.gridBuf contents];
     oldPlane = base + (size_t)self.displayPlane * (size_t)self.planeCells;
+    scratchPlane = base + ((size_t)(self.displayPlane + 1) % (size_t)PLANE_COUNT) *
+                    (size_t)self.planeCells;
 
-    gol_copy_region(oldPlane, oldW, oldH, self.resizeTmp, newW, newH,
+    gol_copy_region(oldPlane, oldW, oldH, scratchPlane, newW, newH,
                     self.planeCells, srcX, srcY);
     self.gridW = newW;
     self.gridH = newH;
     self.viewOffsetX = 0.0;
     self.viewOffsetY = 0.0;
 
-    memcpy(base, self.resizeTmp, (size_t)self.planeCells * sizeof(uint16_t));
+    if ((self.displayPlane + 1) % (uint32_t)PLANE_COUNT != 0) {
+        memcpy(base, scratchPlane, (size_t)self.planeCells * sizeof(uint16_t));
+    }
     for (p = 1; p < (uint32_t)PLANE_COUNT; p++) {
         memset(base + (size_t)p * (size_t)self.planeCells, 0, self.planeBytes);
     }
@@ -1869,10 +1865,10 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     d.storageMode = MTLStorageModePrivate;
     self.cellTex = [self.device newTextureWithDescriptor:d];
 
-    td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
-                                                           width:w
-                                                          height:h
-                                                      mipmapped:NO];
+    td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR16Unorm
+                                                            width:w
+                                                           height:h
+                                                       mipmapped:NO];
     td.usage = (MTLTextureUsage)(MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite);
     td.storageMode = MTLStorageModePrivate;
     self.trailTex = [self.device newTextureWithDescriptor:td];
@@ -2566,8 +2562,6 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
         [NSEvent removeMonitor:self.keyMonitor];
         self.keyMonitor = nil;
     }
-    free(self.resizeTmp);
-    self.resizeTmp = nil;
 }
 
 - (BOOL)windowShouldClose:(NSWindow *)sender {

@@ -33,8 +33,7 @@ would help.
 - **Birth / death flash**: briefly highlight cells that just changed state.
 - **Background grid lines + vignette** for a more "lab" look.
 - **Tunable trail persistence**: the fade is hard-coded to `0.94` in
-  `shaders.metal:269`; expose it as a control.
-- **Palette for trails** (currently trails reuse the cell color).
+  `shaders.metal:295`; expose it as a control.
 
 ## Deferred — gameplay / UX
 

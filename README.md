@@ -18,8 +18,8 @@ effect, and three display modes.
   generations), which the Age and Heatmap display modes visualize.
 - **Viewport-scaled grid**: the computational window grows and shrinks with
   what you can see: zoom out and the grid expands to cover the viewport (up to
-  a 1 GiB total memory budget — tens of millions of cells), zoom in and it
-  contracts. Patterns are preserved across resizes.
+  a 1 GiB total memory budget, about 12 bytes per cell — tens of millions of
+  cells), zoom in and it contracts. Patterns are preserved across resizes.
 - **Camera**: scroll to zoom at the cursor, Option-drag (or middle-drag) to
   pan. At sub-pixel zoom levels the renderer switches to linear filtering with
   premultiplied alpha compositing so shrunken patterns stay smooth instead of
@@ -33,7 +33,7 @@ effect, and three display modes.
 - **Display modes**: Age (color by cell age), Trails (phosphor-style
   persistence), and Heatmap (accumulated heat by age).
 - **Color palettes**: Viridis, Inferno, Plasma, and Turbo — applied to the
-  Age and Heatmap modes.
+  Age, Trails, and Heatmap modes.
 - **Glow / bloom**: a subtle additive glow around live cells, toggleable from
   the toolbar or with `G`.
 - **Live stats**: generation, population (with a live trend sparkline), max
@@ -142,7 +142,7 @@ Example:
 - **Rendering**: a small render pass copies the live plane into a cell
   texture (only when it changes), then a full-screen fragment shader scales
   it to the viewport with camera transforms. Trails accumulate in a second
-  texture via an additive compute pass.
+  single-channel texture via a fade-and-max pass, tinted by the active palette.
 - **Resize safety**: grid resizes copy the old pattern into a persistent
   scratch buffer with origin-aware region copying, so panning/zooming never
   loses or duplicates pattern data.
