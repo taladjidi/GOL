@@ -322,7 +322,6 @@ static const int kSparkCapacity = 120;
     if (self.count < kSparkCapacity) {
         self.count++;
     }
-    [self setNeedsDisplay:YES];
 }
 
 - (void)resetBuffer {
@@ -464,6 +463,8 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
 @property (nonatomic, assign) uint32_t popAlive;
 @property (nonatomic, assign) uint32_t popMaxAge;
 @property (nonatomic, assign) uint32_t lastStatsGen;
+@property (nonatomic, assign) BOOL statsDirty;
+@property (nonatomic, assign) int fpsValue;
 @property (nonatomic, assign) CFTimeInterval fpsWindowStart;
 @property (nonatomic, assign) CFTimeInterval simLastTime;
 @property (nonatomic, assign) uint32_t fpsFrames;
@@ -477,6 +478,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
 @property (nonatomic, strong) NSTextField *popLabel;
 @property (nonatomic, strong) NSTextField *maxAgeLabel;
 @property (nonatomic, strong) GOLSparklineView *popSpark;
+@property (nonatomic, strong) NSTimer *statsTimer;
 @property (nonatomic, strong) NSSlider *speedSlider;
 @property (nonatomic, strong) NSTextField *speedLabel;
 @property (nonatomic, strong) NSPopUpButton *rulePopup;
@@ -698,6 +700,8 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
 @synthesize popAlive = _popAlive;
 @synthesize popMaxAge = _popMaxAge;
 @synthesize lastStatsGen = _lastStatsGen;
+@synthesize statsDirty = _statsDirty;
+@synthesize fpsValue = _fpsValue;
 @synthesize fpsWindowStart = _fpsWindowStart;
 @synthesize simLastTime = _simLastTime;
 @synthesize fpsFrames = _fpsFrames;
@@ -711,6 +715,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
 @synthesize popLabel = _popLabel;
 @synthesize maxAgeLabel = _maxAgeLabel;
 @synthesize popSpark = _popSpark;
+@synthesize statsTimer = _statsTimer;
 @synthesize speedSlider = _speedSlider;
 @synthesize speedLabel = _speedLabel;
 @synthesize rulePopup = _rulePopup;
@@ -804,6 +809,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     NSMenu *mainMenu;
     NSMenuItem *appItem;
     NSMenu *appMenu;
+    NSRunLoop *runLoop;
     (void)note;
     now = CFAbsoluteTimeGetCurrent();
     self.frameIndex = 0;
@@ -813,6 +819,8 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     self.gridH = INITIAL_GRID_H;
     self.gen = 0;
     self.lastStatsGen = 0;
+    self.statsDirty = NO;
+    self.fpsValue = -1;
     self.dirty = NO;
     self.running = NO;
     self.fpsWindowStart = now;
@@ -838,6 +846,14 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     }
     [self setupUI];
     [self applyLaunchConfig];
+
+    self.statsTimer = [NSTimer timerWithTimeInterval:1.0 / 15.0
+                                              target:self
+                                            selector:@selector(flushStats)
+                                            userInfo:nil
+                                             repeats:YES];
+    runLoop = [NSRunLoop mainRunLoop];
+    [runLoop addTimer:self.statsTimer forMode:NSRunLoopCommonModes];
 
     mainMenu = [NSMenu new];
     appItem = [mainMenu addItemWithTitle:@"" action:nil keyEquivalent:@""];
@@ -1248,15 +1264,36 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     self.lastStatsGen = gen;
     self.popAlive = alive;
     self.popMaxAge = maxAge;
-    if (self.popLabel != nil) {
-        self.popLabel.stringValue = [NSString stringWithFormat:@"Pop: %u", alive];
-    }
-    if (self.maxAgeLabel != nil) {
-        self.maxAgeLabel.stringValue = [NSString stringWithFormat:@"MaxAge: %u", maxAge];
-    }
     if (self.popSpark != nil) {
         [self.popSpark pushValue:(int)alive];
     }
+    self.statsDirty = YES;
+    if (!self.running) {
+        [self flushStats];
+    }
+}
+
+- (void)flushStats {
+    if (!self.statsDirty) {
+        return;
+    }
+    if (self.genLabel != nil) {
+        self.genLabel.stringValue = [NSString stringWithFormat:@"Gen %u", self.gen];
+    }
+    if (self.popLabel != nil) {
+        self.popLabel.stringValue = [NSString stringWithFormat:@"Pop: %u", self.popAlive];
+    }
+    if (self.maxAgeLabel != nil) {
+        self.maxAgeLabel.stringValue = [NSString stringWithFormat:@"MaxAge: %u", self.popMaxAge];
+    }
+    if (self.fpsLabel != nil) {
+        self.fpsLabel.stringValue = (self.fpsValue < 0) ? @"FPS --"
+            : [NSString stringWithFormat:@"FPS %d", self.fpsValue];
+    }
+    if (self.popSpark != nil) {
+        [self.popSpark setNeedsDisplay:YES];
+    }
+    self.statsDirty = NO;
 }
 
 - (void)clearTrailNow {
@@ -2566,18 +2603,13 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     }
     self.lastCB = cb;
 
-    if (self.genLabel != nil) {
-        self.genLabel.stringValue = [NSString stringWithFormat:@"Gen %u", self.gen];
-    }
-
     self.fpsFrames = self.fpsFrames + 1u;
     if (now - self.fpsWindowStart >= 1.0) {
         fpsDt = now - self.fpsWindowStart;
         if (fpsDt > 0.0) {
             fps = LroundInt((double)self.fpsFrames / fpsDt);
-            if (self.fpsLabel != nil) {
-                self.fpsLabel.stringValue = [NSString stringWithFormat:@"FPS %d", fps];
-            }
+            self.fpsValue = fps;
+            self.statsDirty = YES;
         }
         self.fpsWindowStart = now;
         self.fpsFrames = 0;
@@ -2590,6 +2622,10 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
 
 - (void)applicationWillTerminate:(NSNotification *)note {
     (void)note;
+    if (self.statsTimer != nil) {
+        [self.statsTimer invalidate];
+        self.statsTimer = nil;
+    }
     if (self.keyMonitor != nil) {
         [NSEvent removeMonitor:self.keyMonitor];
         self.keyMonitor = nil;
