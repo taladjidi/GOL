@@ -17,6 +17,23 @@ would help.
 - **Gameplay**: live population sparkline, more presets (Pulsar, Acorn, …), a
   Randomize button, and zoom-to-pattern (Fit now frames the live cells).
 
+## Measured
+
+- **Step-kernel cost at the memory cap** (Apple M3 Max, `Mac15,9`; macOS 26.6.2,
+  build 25G83). One `gol_step` dispatch over the full cap grid
+  (12116×7384 ≈ 89.5M cells), timed headlessly in `tests/metal_test.m`
+  (`GOL_BENCH_CAP=1`) as wall-clock around `commit` + `waitUntilCompleted`,
+  best of 10 after 3 warmup steps:
+  - Untiled (one thread per cell, nine strided global neighbor loads): **~7.2 ms**.
+  - Tiled (16×16 threadgroup loading an 18×18 torus halo into threadgroup
+    memory, `shaders.metal`): **~5.4 ms** — a ~25% win, so tiling was kept.
+- **Implication:** at the cap a single step is ~5.4 ms, i.e. a GPU ceiling of
+  ~185 gen/s — so the 600 gen/s slider max is compute-bound (unreachable) at the
+  absolute cap; only smaller grids can sustain it.
+- **Deferred:** the live in-app 600 gen/s compute-vs-presentation split under
+  Instruments. The display session was asleep/off-screen during this work, so the
+  headless number above stands in for the decision gate.
+
 ## Deferred — big architectural change
 
 - **World / viewport decoupling.** Today the grid *is* the viewport: it resizes

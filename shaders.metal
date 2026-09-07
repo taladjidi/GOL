@@ -219,49 +219,71 @@ constexpr sampler s_linear(filter::linear, address::clamp_to_edge);
     return float4(col, 1.0f);
 }
 
+// Wraps a possibly-negative coordinate back into [0, size) for the torus.
+static inline uint wrapCoord(int v, uint size) {
+    int r = v % static_cast<int>(size);
+    if (r < 0) { r += static_cast<int>(size); }
+    return static_cast<uint>(r);
+}
+
 // Advances one generation: reads cur plane, writes next plane.
-// One thread handles one cell. Out-of-range threads contribute zeros so every
-// lane reaches the simdgroup reduction; each simdgroup then adds its alive
-// count and max age into stats[0]/stats[1].
+// Each 16x16 threadgroup cooperatively loads an 18x18 tile (the 16x16 block
+// plus a one-cell torus-wrapped halo) into shared memory, so the eight neighbor
+// reads hit fast threadgroup storage instead of nine strided global loads.
+// Out-of-range threads still load the tile and reach the barrier and reduction,
+// contributing zeros; each simdgroup then adds its alive count and max age into
+// stats[0]/stats[1]. The tile is sized for a 16x16 threadgroup.
 [[kernel]] void gol_step(device const ushort *cur [[buffer(0)]],
                          device ushort *next [[buffer(1)]],
                          constant Uniforms &u [[buffer(2)]],
                          device atomic_uint *stats [[buffer(3)]],
                          uint2 gid [[thread_position_in_grid]],
+                         uint2 tid [[thread_position_in_threadgroup]],
                          uint simdLane [[thread_index_in_simdgroup]]) {
+    threadgroup ushort tile[18][18];
+
     bool inRange = (gid.x < u.gridW) && (gid.y < u.gridH);
     uint outAlive = 0u;
     uint outAge = 0u;
 
+    uint gw = u.gridW;
+    uint gh = u.gridH;
+    int a = static_cast<int>(tid.x);
+    int b = static_cast<int>(tid.y);
+    int gx = static_cast<int>(gid.x);   // this thread's center cell (global)
+    int gy = static_cast<int>(gid.y);
+
+    // Load the 18x18 tile; each of its 324 cells is written exactly once
+    // across the 256 threads (center by all, edges/corners by border threads).
+    tile[b + 1][a + 1] = cur[wrapCoord(gy, gh) * gw + wrapCoord(gx, gw)];
+    if (b == 0) {
+        tile[0][a + 1] = cur[wrapCoord(gy - 1, gh) * gw + wrapCoord(gx, gw)];
+    } else if (b == 15) {
+        tile[17][a + 1] = cur[wrapCoord(gy + 1, gh) * gw + wrapCoord(gx, gw)];
+    }
+    if (a == 0) {
+        tile[b + 1][0] = cur[wrapCoord(gy, gh) * gw + wrapCoord(gx - 1, gw)];
+    } else if (a == 15) {
+        tile[b + 1][17] = cur[wrapCoord(gy, gh) * gw + wrapCoord(gx + 1, gw)];
+    }
+    if (a == 0 && b == 0) {
+        tile[0][0] = cur[wrapCoord(gy - 1, gh) * gw + wrapCoord(gx - 1, gw)];
+    } else if (a == 15 && b == 0) {
+        tile[0][17] = cur[wrapCoord(gy - 1, gh) * gw + wrapCoord(gx + 1, gw)];
+    } else if (a == 0 && b == 15) {
+        tile[17][0] = cur[wrapCoord(gy + 1, gh) * gw + wrapCoord(gx - 1, gw)];
+    } else if (a == 15 && b == 15) {
+        tile[17][17] = cur[wrapCoord(gy + 1, gh) * gw + wrapCoord(gx + 1, gw)];
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
     if (inRange) {
-        int w = static_cast<int>(u.gridW);
-        int h = static_cast<int>(u.gridH);
-        int x = static_cast<int>(gid.x);
-        int y = static_cast<int>(gid.y);
+        int n = (tile[b][a] & 1) + (tile[b][a + 1] & 1) + (tile[b][a + 2] & 1)
+              + (tile[b + 1][a] & 1) + (tile[b + 1][a + 2] & 1)
+              + (tile[b + 2][a] & 1) + (tile[b + 2][a + 1] & 1) + (tile[b + 2][a + 2] & 1);
 
-        int xL = (x > 0) ? x - 1 : w - 1;
-        int xR = (x + 1 < w) ? x + 1 : 0;
-        int yU = (y > 0) ? y - 1 : h - 1;
-        int yD = (y + 1 < h) ? y + 1 : 0;
-
-        uint ux = static_cast<uint>(x);
-        uint rowU = static_cast<uint>(yU) * u.gridW;
-        uint rowC = static_cast<uint>(y) * u.gridW;
-        uint rowD = static_cast<uint>(yD) * u.gridW;
-
-        int n = static_cast<int>(cur[rowC + static_cast<uint>(xL)] & 1u)
-              + static_cast<int>(cur[rowC + ux] & 1u)
-              + static_cast<int>(cur[rowC + static_cast<uint>(xR)] & 1u)
-              + static_cast<int>(cur[rowU + static_cast<uint>(xL)] & 1u)
-              + static_cast<int>(cur[rowU + ux] & 1u)
-              + static_cast<int>(cur[rowU + static_cast<uint>(xR)] & 1u)
-              + static_cast<int>(cur[rowD + static_cast<uint>(xL)] & 1u)
-              + static_cast<int>(cur[rowD + ux] & 1u)
-              + static_cast<int>(cur[rowD + static_cast<uint>(xR)] & 1u);
-        n -= static_cast<int>(cur[rowC + ux] & 1u);
-
-        uint idx = rowC + ux;
-        ushort v = cur[idx];
+        ushort v = tile[b + 1][a + 1];
         bool alive = (v & 1u) != 0u;
         uint age = (v >> 1) & 0x7FFFu;
 
@@ -272,6 +294,8 @@ constexpr sampler s_linear(filter::linear, address::clamp_to_edge);
             uint newAge = alive ? (age >= 32767u ? 32767u : age + 1u) : 1u;
             out = 1u | (newAge << 1);
         }
+
+        uint idx = gid.y * gw + gid.x;
         next[idx] = static_cast<ushort>(out);
         outAlive = out & 1u;
         outAge = (out >> 1) & 0x7FFFu;

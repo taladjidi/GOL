@@ -6,12 +6,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "gol.h"
 #include "refstep.h"
-
-#define GOL_MIN(A, B) ((A) < (B) ? (A) : (B))
-#define GOL_MAX(A, B) ((A) > (B) ? (A) : (B))
 
 typedef struct {
     uint32_t gridW;
@@ -76,7 +74,6 @@ int main(int argc, char *argv[]) {
         size_t rule_count;
         size_t grid_count;
         size_t density_count;
-        NSUInteger execThreads;
         NSUInteger tx;
         NSUInteger ty;
 
@@ -121,9 +118,10 @@ int main(int argc, char *argv[]) {
         grid_count = sizeof(widths) / sizeof(widths[0]);
         density_count = sizeof(densities) / sizeof(densities[0]);
 
-        execThreads = [pipeline threadExecutionWidth];
-        tx = GOL_MIN((NSUInteger)16, GOL_MAX((NSUInteger)1, execThreads));
-        ty = GOL_MAX((NSUInteger)1, GOL_MIN((NSUInteger)16, execThreads / tx));
+        // The gol_step kernel bakes in an 18x18 tile for a 16x16 threadgroup,
+        // so the dispatch shape is fixed rather than derived from the pipeline.
+        tx = 16;
+        ty = 16;
 
         for (size_t ri = 0; ri < rule_count; ri++) {
             for (size_t gi = 0; gi < grid_count; gi++) {
@@ -418,6 +416,104 @@ int main(int argc, char *argv[]) {
             }
 
             free(pixels);
+        }
+
+        if (getenv("GOL_BENCH_CAP") != NULL) {
+            int bw = 12116;
+            int bh = 7384;
+            size_t bn = (size_t)bw * (size_t)bh;
+            NSUInteger bbytes = (NSUInteger)(bn * sizeof(uint16_t));
+            id<MTLBuffer> bcur;
+            id<MTLBuffer> bnext;
+            id<MTLBuffer> bun;
+            id<MTLBuffer> bstats;
+            id<MTLCommandBuffer> cb;
+            id<MTLComputeCommandEncoder> enc;
+            Uniforms bu;
+            NSUInteger bgx;
+            NSUInteger bgy;
+            int iters;
+            double best;
+            double total;
+
+            bcur = [device newBufferWithLength:bbytes options:MTLResourceStorageModeShared];
+            bnext = [device newBufferWithLength:bbytes options:MTLResourceStorageModeShared];
+            bun = [device newBufferWithLength:sizeof(Uniforms) options:MTLResourceStorageModeShared];
+            bstats = [device newBufferWithLength:16 options:MTLResourceStorageModeShared];
+
+            if (bcur == nil || bnext == nil || bun == nil || bstats == nil) {
+                printf("cap bench: could not allocate %zu-byte planes; skipping\n", bbytes);
+            } else {
+                memset(&bu, 0, sizeof(bu));
+                bu.gridW = (uint32_t)bw;
+                bu.gridH = (uint32_t)bh;
+                bu.birth = (1u << 3);
+                bu.survival = (1u << 2) | (1u << 3);
+                memcpy([bun contents], &bu, sizeof(bu));
+
+                gol_randomize((uint16_t *)[bcur contents], bn, bw, bh, 0.25);
+                memset([bnext contents], 0, bbytes);
+
+                bgx = ((NSUInteger)bw + tx - 1) / tx;
+                bgy = ((NSUInteger)bh + ty - 1) / ty;
+
+                for (iters = 0; iters < 3; iters++) {
+                    cb = [queue commandBuffer];
+                    enc = [cb computeCommandEncoder];
+                    [enc setComputePipelineState:pipeline];
+                    memset([bstats contents], 0, 16);
+                    [enc setBuffer:bcur offset:0 atIndex:0];
+                    [enc setBuffer:bnext offset:0 atIndex:1];
+                    [enc setBuffer:bun offset:0 atIndex:2];
+                    [enc setBuffer:bstats offset:0 atIndex:3];
+                    [enc dispatchThreadgroups:MakeSize((int)bgx, (int)bgy, 1)
+                      threadsPerThreadgroup:MakeSize((int)tx, (int)ty, 1)];
+                    [enc endEncoding];
+                    [cb commit];
+                    [cb waitUntilCompleted];
+                }
+
+                best = 1e9;
+                total = 0.0;
+                iters = 10;
+                for (int i = 0; i < iters; i++) {
+                    id<MTLBuffer> tmp;
+                    struct timespec t0, t1;
+                    double dt;
+
+                    clock_gettime(CLOCK_MONOTONIC, &t0);
+                    cb = [queue commandBuffer];
+                    enc = [cb computeCommandEncoder];
+                    [enc setComputePipelineState:pipeline];
+                    memset([bstats contents], 0, 16);
+                    [enc setBuffer:bcur offset:0 atIndex:0];
+                    [enc setBuffer:bnext offset:0 atIndex:1];
+                    [enc setBuffer:bun offset:0 atIndex:2];
+                    [enc setBuffer:bstats offset:0 atIndex:3];
+                    [enc dispatchThreadgroups:MakeSize((int)bgx, (int)bgy, 1)
+                      threadsPerThreadgroup:MakeSize((int)tx, (int)ty, 1)];
+                    [enc endEncoding];
+                    [cb commit];
+                    [cb waitUntilCompleted];
+                    clock_gettime(CLOCK_MONOTONIC, &t1);
+
+                    dt = (double)(t1.tv_sec - t0.tv_sec) * 1000.0
+                       + (double)(t1.tv_nsec - t0.tv_nsec) / 1e6;
+                    if (dt < best) { best = dt; }
+                    total += dt;
+
+                    tmp = bcur; bcur = bnext; bnext = tmp;
+                }
+
+                {
+                    uint32_t *s = (uint32_t *)[bstats contents];
+                    printf("cap bench: %dx%d (%.1fM cells), threadgroup %zux%zu\n",
+                           bw, bh, (double)bn / 1e6, tx, ty);
+                    printf("  one gol_step dispatch: best %.2f ms, avg %.2f ms (wall, incl. submit)\n",
+                           best, total / iters);
+                    printf("  population after last step: %u\n", s[0]);
+                }
+            }
         }
 
         printf("All Metal tests passed!\n");
