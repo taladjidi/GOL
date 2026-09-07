@@ -57,16 +57,22 @@ R-Pentomino simulation:
 ## Build and Run
 
 ```sh
-make run        # builds bin/gol + bin/shaders.metallib and launches the app
+make run        # builds bin/GOL.app (the app bundle) and launches it
 ```
 
 Other targets:
 
 ```sh
-make all       # build only (bin/gol, bin/shaders.metallib)
+make app       # build the bin/GOL.app bundle only (does not launch)
+make run-bare  # build and run the bare bin/gol binary (no bundle)
+make all       # build only (bin/gol, bin/default.metallib)
 make test      # run the CPU and Metal test suites
 make clean     # remove bin/ and build/
 ```
+
+`bin/GOL.app` is a self-contained bundle: `Contents/MacOS/gol`,
+`Contents/Resources/default.metallib`, and (once the icon exists) `GOL.icns`.
+The bare `bin/gol` binary still works for scripting and the test suite.
 
 The whole project compiles with `-Weverything` (C, Objective-C, and Metal)
 and ships warning-free.
@@ -162,7 +168,7 @@ make test
   implementation, including preset oscillation periods (block, blinker, toad,
   beacon, pentadecathlon) and glider/LWSS translation.
 - `tests/metal_test.m`: runs the actual Metal step/trail kernels from the
-  built `shaders.metallib` and compares them against the CPU reference.
+  built `default.metallib` and compares them against the CPU reference.
 
 ## Project Layout
 
@@ -171,5 +177,6 @@ src/main.m        App, UI, camera, Metal setup, render loop (Objective-C)
 src/gol.c/.h      CPU simulation helpers (rules, packing, resize, presets)
 shaders.metal     Step, cell-texture, trail, and scale shaders
 tests/            CPU reference tests and Metal kernel tests
+packaging/        App bundle Info.plist (and icon source)
 Makefile          Warning-free build, test, and run targets
 ```

@@ -904,12 +904,17 @@ static int paintCount;
         return NO;
     }
 
-    exeDir = [[NSBundle mainBundle] executablePath];
-    exeDir = [exeDir stringByDeletingLastPathComponent];
-    libPath = [exeDir stringByAppendingPathComponent:@"shaders.metallib"];
-    libURL = [NSURL fileURLWithPath:libPath];
-    err = nil;
-    self.library = [self.device newLibraryWithURL:libURL error:&err];
+    // Prefer the bundle's default library (works when packaged as GOL.app);
+    // fall back to the executable directory for an unbundled ./bin/gol.
+    self.library = [self.device newDefaultLibrary];
+    if (self.library == nil) {
+        exeDir = [[NSBundle mainBundle] executablePath];
+        exeDir = [exeDir stringByDeletingLastPathComponent];
+        libPath = [exeDir stringByAppendingPathComponent:@"default.metallib"];
+        libURL = [NSURL fileURLWithPath:libPath];
+        err = nil;
+        self.library = [self.device newLibraryWithURL:libURL error:&err];
+    }
     if (self.library == nil) {
         NSLog(@"failed to load metallib: %@", err);
         return NO;

@@ -85,7 +85,7 @@ int main(int argc, char *argv[]) {
             return 0;
         }
 
-        libPath = argc > 1 ? [NSString stringWithUTF8String:argv[1]] : @"bin/shaders.metallib";
+        libPath = argc > 1 ? [NSString stringWithUTF8String:argv[1]] : @"bin/default.metallib";
         error = nil;
         library = [device newLibraryWithURL:[NSURL fileURLWithPath:libPath] error:&error];
         if (!library) {

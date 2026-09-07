@@ -5,7 +5,9 @@ METALFLAGS = -Weverything -Wno-c++98-compat -Wno-deprecated
 FRAMEWORKS = -framework Cocoa -framework Metal -framework MetalKit -framework QuartzCore
 METAL_FRAMEWORKS = -framework Metal
 
-all: bin/gol bin/shaders.metallib
+VERSION = 0.1.0
+
+all: bin/gol bin/default.metallib
 
 bin:
 	@mkdir -p bin
@@ -40,19 +42,35 @@ build/metal_test: build/metal_test.o build/gol.o | build
 bin/gol: build/main.o build/gol.o | bin
 	$(CC) $(OBJCFLAGS) $^ -o $@ $(FRAMEWORKS)
 
-bin/shaders.metallib: shaders.metal | bin build
+bin/default.metallib: shaders.metal | bin build
 	xcrun -sdk macosx metal $(METALFLAGS) -c shaders.metal -o build/shaders.air
 	xcrun -sdk macosx metallib build/shaders.air -o $@
 
-run: all
+# Assemble the app bundle. The icns is copied only if 3.2 has generated it, so
+# the bundle builds (icon-less) before the icon exists.
+bin/GOL.app: bin/gol bin/default.metallib packaging/Info.plist | bin
+	rm -rf $@
+	mkdir -p $@/Contents/MacOS $@/Contents/Resources
+	cp bin/gol $@/Contents/MacOS/
+	cp bin/default.metallib $@/Contents/Resources/
+	[ -f bin/GOL.icns ] && cp bin/GOL.icns $@/Contents/Resources/ || true
+	sed 's/$$(VERSION)/$(VERSION)/g' packaging/Info.plist > $@/Contents/Info.plist
+	codesign -s - --force --deep $@
+
+app: bin/GOL.app
+
+run: app
+	open bin/GOL.app
+
+run-bare: all
 	./bin/gol
 
-test: build/gol_test build/ref_test build/metal_test bin/shaders.metallib
+test: build/gol_test build/ref_test build/metal_test bin/default.metallib
 	./build/gol_test
 	./build/ref_test
-	./build/metal_test bin/shaders.metallib
+	./build/metal_test bin/default.metallib
 
 clean:
 	rm -rf bin build
 
-.PHONY: all run clean test
+.PHONY: all app run run-bare clean test
