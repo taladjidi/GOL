@@ -427,6 +427,21 @@ static const GOLFamousRule kFamousRules[] = {
 
 static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousRules[0]));
 
+// One queued paint sample (a single mouse event). Records are applied together
+// at the top of the next tick so a fast drag does not stall the pipeline per event.
+typedef struct {
+    int col;
+    int row;
+    int radius;
+    int add;
+} PaintOp;
+
+enum { kPaintQueueCap = 256 };
+
+// App is a singleton, so the queue lives at file scope rather than as ivars.
+static PaintOp paintQueue[kPaintQueueCap];
+static int paintCount;
+
 @interface App : NSObject <NSApplicationDelegate, NSWindowDelegate, MTKViewDelegate>
 @property (nonatomic, strong) NSWindow *window;
 @property (nonatomic, strong) GOLView *mtkView;
@@ -534,6 +549,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
 - (BOOL)handleKey:(NSEvent *)event;
 - (void)sliderChanged:(id)sender;
 - (void)paintAtEvent:(NSEvent *)e add:(BOOL)add;
+- (void)applyPaintQueue;
 - (void)waitLast;
 - (void)waitAll;
 - (uint16_t *)planePointer:(uint32_t)plane;
@@ -1710,41 +1726,69 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     NSPoint pt;
     int col;
     int row;
-    int dx;
-    int dy;
-    int cx;
-    int cy;
-    uint16_t *cells;
-    int alive;
-    int maxAge;
 
     if (self.mtkView == nil) {
         return;
     }
-    [self waitAll];
     pt = [self topPointForEvent:e];
     if (![self gridCellAtPoint:pt col:&col row:&row]) {
         return;
     }
-    cells = [self currentCells];
-    if (cells == nil) {
+    // Queue the stroke instead of editing the plane now. A fast drag fires many
+    // events per frame, and each used to force a waitAll that stalled the pipeline;
+    // the records are applied together at the top of the next tick.
+    if (paintCount >= kPaintQueueCap) {
+        memmove(&paintQueue[0], &paintQueue[1], (size_t)(kPaintQueueCap - 1) * sizeof(PaintOp));
+        paintCount = kPaintQueueCap - 1;
+    }
+    paintQueue[paintCount].col = col;
+    paintQueue[paintCount].row = row;
+    paintQueue[paintCount].radius = self.brushRadius;
+    paintQueue[paintCount].add = add;
+    paintCount++;
+    [self markDirty];
+    [self updateHoverAtPoint:pt];
+}
+
+- (void)applyPaintQueue {
+    uint16_t *cells;
+    int alive;
+    int maxAge;
+    int i;
+
+    if (paintCount == 0) {
         return;
     }
-    for (dy = -self.brushRadius; dy <= self.brushRadius; dy++) {
-        for (dx = -self.brushRadius; dx <= self.brushRadius; dx++) {
-            cx = col + dx;
-            cy = row + dy;
-            if (cx >= 0 && cx < self.gridW && cy >= 0 && cy < self.gridH) {
-                gol_set_plane(cells, self.gridW, self.gridH, cx, cy, add);
+    [self waitAll];
+    cells = [self currentCells];
+    if (cells == nil) {
+        paintCount = 0;
+        return;
+    }
+    for (i = 0; i < paintCount; i++) {
+        int dx;
+        int dy;
+        int cx;
+        int cy;
+        for (dy = -paintQueue[i].radius; dy <= paintQueue[i].radius; dy++) {
+            for (dx = -paintQueue[i].radius; dx <= paintQueue[i].radius; dx++) {
+                cx = paintQueue[i].col + dx;
+                cy = paintQueue[i].row + dy;
+                if (cx >= 0 && cx < self.gridW && cy >= 0 && cy < self.gridH) {
+                    gol_set_plane(cells, self.gridW, self.gridH, cx, cy, paintQueue[i].add);
+                }
             }
         }
     }
-    alive = 0;
-    maxAge = 0;
-    gol_count_alive(cells, self.gridW, self.gridH, &alive, &maxAge);
-    [self setPopulation:(uint32_t)alive maxAge:(uint32_t)maxAge forGeneration:self.gen];
-    [self markDirty];
-    [self updateHoverAtPoint:pt];
+    // While running the step kernel recomputes the population via its stats slot,
+    // so only fall back to a CPU count on the paused path (avoids a full-grid pass).
+    if (!self.running) {
+        alive = 0;
+        maxAge = 0;
+        gol_count_alive(cells, self.gridW, self.gridH, &alive, &maxAge);
+        [self setPopulation:(uint32_t)alive maxAge:(uint32_t)maxAge forGeneration:self.gen];
+    }
+    paintCount = 0;
 }
 
 - (void)waitLast {
@@ -1864,6 +1908,7 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     self.frameIndex = 0;
     self.displayPlane = 0;
     self.completedPlane = 0;
+    paintCount = 0;
     [self rebuildCellTexture];
     [self clearTrailNow];
     cells = [self currentCells];
@@ -2326,6 +2371,9 @@ static const int kFamousRuleCount = (int)(sizeof(kFamousRules) / sizeof(kFamousR
     if (self.needsGridResize) {
         [self updateGridForPixelSize:CGSizeZero];
     }
+
+    // Apply any queued paint strokes once per frame (no-op when the queue is empty).
+    [self applyPaintQueue];
 
     if (!self.running && !self.dirty) {
         self.mtkView.paused = YES;
