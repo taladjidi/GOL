@@ -47,9 +47,6 @@ would help.
 
 ## Deferred — code quality (correctness/robustness, not features)
 
-- **Better RNG.** `gol_randomize` uses `srand(time(NULL))` + `rand()`
-  (`gol.c:32`). Fine for now; a proper PRNG (e.g. splitmix64) would be more
-  reproducible and higher quality.
 - **Toolbar layout.** The toolbar is laid out with a manual x-cursor
   (`main.m:1816+`). Fragile to label-width changes. An `NSStackView`/Auto Layout
   pass would make it robust.

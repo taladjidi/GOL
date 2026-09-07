@@ -465,6 +465,43 @@ static void test_copy_region(void) {
     printf("  PASS\n\n");
 }
 
+// Test: Seeded randomize is reproducible and hits the requested density
+static void test_randomize_seeded(void) {
+    enum { W = 64, H = 64 };
+    uint16_t *a;
+    uint16_t *b;
+    int i;
+    int same;
+    int alive;
+    double frac;
+
+    printf("Test: Seeded randomize\n");
+    a = (uint16_t *)calloc((size_t)W * H, sizeof(uint16_t));
+    b = (uint16_t *)calloc((size_t)W * H, sizeof(uint16_t));
+    assert(a != NULL);
+    assert(b != NULL);
+
+    gol_seed(42);
+    gol_randomize(a, (size_t)W * H, W, H, 0.5);
+    gol_seed(42);
+    gol_randomize(b, (size_t)W * H, W, H, 0.5);
+
+    same = 1;
+    for (i = 0; i < W * H; i++) {
+        if (a[i] != b[i]) { same = 0; break; }
+    }
+    assert(same);
+
+    alive = count_alive(a, W, H);
+    frac = (double)alive / ((double)W * (double)H);
+    printf("  Alive fraction at density 0.5: %.3f\n", frac);
+    assert(frac > 0.45 && frac < 0.55);
+
+    free(a);
+    free(b);
+    printf("  PASS\n\n");
+}
+
 int main(void) {
     printf("=== Game of Life Tests ===\n\n");
 
@@ -479,6 +516,7 @@ int main(void) {
     test_glider_recovery();
     test_range_rules();
     test_copy_region();
+    test_randomize_seeded();
 
     printf("All tests passed!\n");
     return 0;

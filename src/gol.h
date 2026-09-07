@@ -14,6 +14,7 @@ typedef struct {
 static inline uint16_t GolAge(uint16_t v) { return (v >> 1) & 0x7FFFu; }
 static inline bool GolAlive(uint16_t v) { return (v & 1u) != 0u; }
 
+void gol_seed(uint64_t seed);
 void gol_randomize(uint16_t *cells, size_t planeCells, int w, int h, double density);
 void gol_set_plane(uint16_t *cells, int w, int h, int x, int y, bool alive);
 void gol_step_cpu(const uint16_t *cur, uint16_t *next, int w, int h, GOLRules rules);

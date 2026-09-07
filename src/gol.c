@@ -1,6 +1,5 @@
 #include "gol.h"
 
-#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -21,23 +20,50 @@ bool gol_rule_survive(GOLRules r, int neighbors) {
     return (r.survival >> neighbors) & 1u;
 }
 
+static uint64_t gol_rng_state;
+static int gol_rng_seeded;
+
+// SplitMix64: fast, seedable, reproducible. One 64-bit mix per call.
+static uint64_t splitmix64(void) {
+    uint64_t z;
+    gol_rng_state += 0x9E3779B97F4A7C15ull;
+    z = gol_rng_state;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+
+void gol_seed(uint64_t seed) {
+    gol_rng_state = seed;
+    gol_rng_seeded = 1;
+}
+
 void gol_randomize(uint16_t *cells, size_t planeCells, int w, int h, double density) {
-    static int seeded = 0;
+    uint32_t threshold;
+    uint32_t r;
     size_t n;
-    time_t t;
-    int sample;
-    double r;
-    if (!seeded) {
-        t = time(NULL);
-        srand((unsigned int)t);
-        seeded = 1;
+    int full;
+    double scaled;
+    if (!gol_rng_seeded) {
+        gol_rng_state = (uint64_t)time(NULL) ^ (uint64_t)clock();
+        gol_rng_seeded = 1;
+    }
+    if (density < 0.0) {
+        density = 0.0;
+    }
+    if (density >= 1.0) {
+        full = 1;
+        threshold = UINT32_MAX;
+    } else {
+        scaled = density * 4294967296.0;
+        full = 0;
+        threshold = (scaled >= 4294967296.0) ? UINT32_MAX : (uint32_t)scaled;
     }
     memset(cells, 0, planeCells * sizeof(uint16_t));
     n = (size_t)w * (size_t)h;
     for (size_t i = 0; i < n; i++) {
-        sample = rand();
-        r = (double)sample;
-        if (r / ((double)RAND_MAX + 1.0) < density) {
+        r = (uint32_t)splitmix64();
+        if (full || r < threshold) {
             cells[i] = (uint16_t)1u;
         }
     }
