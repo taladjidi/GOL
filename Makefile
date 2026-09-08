@@ -92,6 +92,16 @@ notarize: app
 	xcrun notarytool submit build/GOL.zip --keychain-profile "$(NOTARY_PROFILE)" --wait
 	xcrun stapler staple bin/GOL.app
 
+# 3.5: distribution archive. Stage the app next to an Applications symlink,
+# then write a compressed read-only DMG to dist/ (a gitignored output dir).
+dist: app
+	rm -rf build/dmg && mkdir -p build/dmg
+	cp -R bin/GOL.app build/dmg/
+	ln -s /Applications build/dmg/Applications
+	mkdir -p dist
+	hdiutil create -volname "GOL" -srcfolder build/dmg -ov -format UDZO dist/GOL-$(VERSION).dmg
+	rm -rf build/dmg
+
 test: build/gol_test build/ref_test build/metal_test bin/default.metallib
 	./build/gol_test
 	./build/ref_test
@@ -100,4 +110,8 @@ test: build/gol_test build/ref_test build/metal_test bin/default.metallib
 clean:
 	rm -rf bin build
 
-.PHONY: all app run run-bare notarize clean test
+# clean removes build outputs but keeps dist/; distclean also drops the archives.
+distclean: clean
+	rm -rf dist
+
+.PHONY: all app run run-bare notarize dist clean distclean test

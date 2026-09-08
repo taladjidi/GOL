@@ -68,7 +68,9 @@ make app       # build the bin/GOL.app bundle only (does not launch)
 make run-bare  # build and run the bare bin/gol binary (no bundle)
 make all       # build only (bin/gol, bin/default.metallib)
 make test      # run the CPU and Metal test suites
-make clean     # remove bin/ and build/
+make dist      # build a distributable dist/GOL-<version>.dmg
+make clean     # remove bin/ and build/ (keeps dist/)
+make distclean # also remove dist/
 ```
 
 `bin/GOL.app` is a self-contained bundle: `Contents/MacOS/gol`,
