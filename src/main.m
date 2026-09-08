@@ -147,6 +147,31 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     return l;
 }
 
+// Marks v for Auto Layout and appends it as an arranged subview of stack.
+static void StackAdd(NSStackView *stack, NSView *v) {
+    v.translatesAutoresizingMaskIntoConstraints = NO;
+    [stack addArrangedSubview:v];
+}
+
+// A horizontal, center-Y-aligned stack of the given views (spacing 4).
+// Pass nil for b/c to build a shorter group.
+static NSStackView *HGroup(NSView *a, NSView *b, NSView *c) {
+    NSStackView *s = [[NSStackView alloc] init];
+    s.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    s.spacing = 4.0;
+    s.alignment = NSLayoutAttributeCenterY;
+    if (a != nil) {
+        StackAdd(s, a);
+    }
+    if (b != nil) {
+        StackAdd(s, b);
+    }
+    if (c != nil) {
+        StackAdd(s, c);
+    }
+    return s;
+}
+
 @class App;
 @class GOLView;
 
@@ -520,7 +545,6 @@ static int paintCount;
 @property (nonatomic, strong) NSTextField *brushLabel;
 @property (nonatomic, strong) NSTextField *zoomLabel;
 @property (nonatomic, strong) NSTextField *hoverLabel;
-@property (nonatomic, strong) NSTextField *hintLabel;
 @property (nonatomic, strong) id keyMonitor;
 @property (nonatomic, copy) NSString *screenshotPath;
 @property (nonatomic, assign) int screenshotGen;
@@ -537,7 +561,6 @@ static int paintCount;
 - (void)fit:(id)sender;
 - (void)fitView;
 - (void)updateZoomLabel;
-- (void)updateHintLabel;
 - (void)toolChanged:(id)sender;
 - (void)displayChanged:(id)sender;
 - (void)paletteChanged:(id)sender;
@@ -767,7 +790,6 @@ static int paintCount;
 @synthesize brushLabel = _brushLabel;
 @synthesize zoomLabel = _zoomLabel;
 @synthesize hoverLabel = _hoverLabel;
-@synthesize hintLabel = _hintLabel;
 @synthesize keyMonitor = _keyMonitor;
 @synthesize screenshotPath = _screenshotPath;
 @synthesize screenshotGen = _screenshotGen;
@@ -957,7 +979,7 @@ static int paintCount;
         return NO;
     }
 
-    self.mtkView = [[GOLView alloc] initWithFrame:NSMakeRect(0, BAR_H, VIEW_W, VIEW_H)
+    self.mtkView = [[GOLView alloc] initWithFrame:NSMakeRect(0, 0, VIEW_W, VIEW_H)
                                            device:self.device];
     self.mtkView.wantsLayer = YES;
     self.mtkView.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
@@ -971,7 +993,7 @@ static int paintCount;
     screenW = screen.frame.size.width;
     screenH = screen.frame.size.height;
     self.maxGridW = FloorInt(screenW / MIN_CELL_PX) + 16;
-    self.maxGridH = FloorInt(GOL_MAX(0.0, screenH - (CGFloat)BAR_H) / MIN_CELL_PX) + 16;
+    self.maxGridH = FloorInt(screenH / MIN_CELL_PX) + 16;
     self.maxGridW = GOL_MAX(self.maxGridW, INITIAL_GRID_W);
     self.maxGridH = GOL_MAX(self.maxGridH, INITIAL_GRID_H);
     self.maxGridW = GOL_MIN(self.maxGridW, MAX_TEXTURE_SIZE / (int)RENDER_SCALE);
@@ -1510,19 +1532,6 @@ static int paintCount;
     self.zoomLabel.stringValue = [NSString stringWithFormat:@"%d%%", pct];
 }
 
-- (void)updateHintLabel {
-    NSString *left;
-    NSString *right;
-    NSString *text;
-    if (self.hintLabel == nil) {
-        return;
-    }
-    left = (self.tool == 0) ? @"add" : @"erase";
-    right = (self.tool == 0) ? @"erase" : @"add";
-    text = [NSString stringWithFormat:@"L:%@ R:%@ M:pan Scroll:zoom", left, right];
-    self.hintLabel.stringValue = text;
-}
-
 - (void)toolChanged:(id)sender {
     (void)sender;
     if (self.toolControl != nil && self.toolControl.selectedSegment >= 0) {
@@ -1530,7 +1539,6 @@ static int paintCount;
     } else {
         self.tool = 0;
     }
-    [self updateHintLabel];
 }
 
 - (void)displayChanged:(id)sender {
@@ -2009,13 +2017,26 @@ static int paintCount;
     NSRect content;
     NSScreen *screen;
     NSView *contentView;
-    NSView *bar;
-    CGFloat x;
-    CGFloat y;
+    NSStackView *bar;
+    NSStackView *simRow;
+    NSStackView *viewRow;
+    NSStackView *statusRow;
     NSButton *clearButton;
     NSButton *randomButton;
     NSButton *fitButton;
     NSPopUpButton *presetsPopup;
+    NSTextField *presetName;
+    NSTextField *speedName;
+    NSTextField *densityName;
+    NSTextField *ruleName;
+    NSTextField *displayName;
+    NSTextField *paletteName;
+    NSTextField *toolName;
+    NSTextField *brushName;
+    NSTextField *zoomName;
+    NSTextField *trendName;
+    NSBox *separator;
+    NSView *spacer;
     __weak App *weakSelf;
 
     content = NSMakeRect(0, 0, VIEW_W, VIEW_H + BAR_H);
@@ -2035,124 +2056,53 @@ static int paintCount;
     [self.window center];
 
     screen = ScreenForWindow(self.window);
-    self.window.minSize = NSMakeSize(500.0, 350.0 + (CGFloat)BAR_H);
     self.window.maxSize = NSMakeSize(screen.frame.size.width, screen.frame.size.height);
 
     contentView = [self.window contentView];
-    self.mtkView.frame = NSMakeRect(0, BAR_H, VIEW_W, VIEW_H);
-    self.mtkView.autoresizingMask = (NSAutoresizingMaskOptions)(NSViewWidthSizable | NSViewHeightSizable);
+
+    // The Metal view fills the top of the window, down to just above the bar.
+    self.mtkView.translatesAutoresizingMaskIntoConstraints = NO;
     [contentView addSubview:self.mtkView];
 
-    bar = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, VIEW_W, BAR_H)];
+    // The bar is a vertical stack of three horizontal rows.
+    bar = [[NSStackView alloc] init];
+    bar.orientation = NSUserInterfaceLayoutOrientationVertical;
+    bar.alignment = NSLayoutAttributeLeading;
+    bar.spacing = 6.0;
+    bar.translatesAutoresizingMaskIntoConstraints = NO;
     bar.wantsLayer = YES;
-    bar.autoresizingMask = (NSAutoresizingMaskOptions)NSViewWidthSizable;
     bar.layer.backgroundColor = [NSColor colorWithSRGBRed:0.07 green:0.08 blue:0.11 alpha:1.0].CGColor;
     [contentView addSubview:bar];
 
-    x = 12;
-    y = 8;
+    // --- Simulation row: transport, then preset and the sliders. ---
+    simRow = [[NSStackView alloc] init];
+    simRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    simRow.alignment = NSLayoutAttributeCenterY;
+    simRow.spacing = 10.0;
 
-    self.fpsLabel = MakeLabel(@"FPS --", NSMakeRect(x, y, 80, 18));
-    [bar addSubview:self.fpsLabel];
-    x += 90;
+    self.goButton = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 52, 24)];
+    self.goButton.title = @"Go";
+    self.goButton.bezelStyle = NSBezelStyleRounded;
+    self.goButton.target = self;
+    self.goButton.action = @selector(goPause:);
+    StackAdd(simRow, self.goButton);
+    // The Step button lands here in 1.4, between Go and Random.
 
-    [bar addSubview:MakeLabelSmall(@"Rule", NSMakeRect(x, y, 35, 18))];
-    x += 40;
-    self.rulePopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(x, y - 2, 115, 24) pullsDown:NO];
-    {
-        int i;
-        for (i = 0; i < kFamousRuleCount; i++) {
-            NSString *title = [NSString stringWithUTF8String:kFamousRules[i].name];
-            if (title != nil) {
-                [self.rulePopup addItemWithTitle:title];
-            }
-        }
-        [self.rulePopup addItemWithTitle:@"Custom"];
-        [self.rulePopup selectItemAtIndex:0]; // Life
-        self.rulePopup.target = self;
-        self.rulePopup.action = @selector(rulePopupChanged:);
-    }
-    [bar addSubview:self.rulePopup];
-    x += 120;
+    randomButton = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 70, 24)];
+    randomButton.title = @"Random";
+    randomButton.bezelStyle = NSBezelStyleRounded;
+    randomButton.target = self;
+    randomButton.action = @selector(randomize:);
+    StackAdd(simRow, randomButton);
 
-    self.ruleToggleView = [[GOLRuleToggleView alloc] initWithFrame:NSMakeRect(x, y - 6, 165, 34)];
-    [bar addSubview:self.ruleToggleView];
-    x += 170;
+    clearButton = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 58, 24)];
+    clearButton.title = @"Clear";
+    clearButton.bezelStyle = NSBezelStyleRounded;
+    clearButton.target = self;
+    clearButton.action = @selector(clear:);
+    StackAdd(simRow, clearButton);
 
-    self.ruleLabel = MakeLabel(@"B3/S23", NSMakeRect(x, y - 2, 120, 22));
-    [bar addSubview:self.ruleLabel];
-    x += 110;
-
-    self.popLabel = MakeLabelSmall(@"Pop: 0", NSMakeRect(x, y - 2, 90, 22));
-    [bar addSubview:self.popLabel];
-    x += 100;
-
-    self.maxAgeLabel = MakeLabelSmall(@"Age: 0", NSMakeRect(x, y - 2, 70, 22));
-    [bar addSubview:self.maxAgeLabel];
-    x += 80;
-
-    [bar addSubview:MakeLabelSmall(@"Trend", NSMakeRect(x, y, 40, 18))];
-    x += 45;
-
-    self.popSpark = [[GOLSparklineView alloc] initWithFrame:NSMakeRect(x, y - 3, 120, 24)];
-    self.popSpark.toolTip = @"Population over recent generations";
-    [bar addSubview:self.popSpark];
-    x += 130;
-
-    self.glowButton = [[NSButton alloc] initWithFrame:NSMakeRect(x, y - 3, 54, 24)];
-    self.glowButton.title = @"Glow";
-    [self.glowButton setButtonType:NSButtonTypeSwitch];
-    self.glowButton.state = self.glowOn ? NSControlStateValueOn : NSControlStateValueOff;
-    self.glowButton.target = self;
-    self.glowButton.action = @selector(glowToggle:);
-    [bar addSubview:self.glowButton];
-
-    y = 38;
-    x = 12;
-
-    [bar addSubview:MakeLabelSmall(@"Density", NSMakeRect(x, y, 50, 18))];
-    x += 55;
-
-    self.densitySlider = [[NSSlider alloc] initWithFrame:NSMakeRect(x, y - 3, 90, 20)];
-    self.densitySlider.minValue = 0.0;
-    self.densitySlider.maxValue = 1.0;
-    self.densitySlider.doubleValue = 0.2;
-    self.densitySlider.allowsTickMarkValuesOnly = NO;
-    self.densitySlider.numberOfTickMarks = 0;
-    self.densitySlider.continuous = YES;
-    self.densitySlider.target = self;
-    self.densitySlider.action = @selector(sliderChanged:);
-    [bar addSubview:self.densitySlider];
-    x += 95;
-
-    self.densityPct = MakeLabelSmall(@"20%", NSMakeRect(x, y, 34, 18));
-    [bar addSubview:self.densityPct];
-    x += 39;
-
-    [bar addSubview:MakeLabelSmall(@"Speed", NSMakeRect(x, y, 42, 18))];
-    x += 47;
-
-    self.speedSlider = [[NSSlider alloc] initWithFrame:NSMakeRect(x, y - 3, 105, 20)];
-    self.speedSlider.minValue = 1.0;
-    self.speedSlider.maxValue = 600.0;
-    self.speedSlider.doubleValue = 30.0;
-    self.speedSlider.allowsTickMarkValuesOnly = NO;
-    self.speedSlider.numberOfTickMarks = 7;
-    self.speedSlider.continuous = YES;
-    self.speedSlider.target = self;
-    self.speedSlider.action = @selector(sliderChanged:);
-    [bar addSubview:self.speedSlider];
-    x += 110;
-
-    self.speedLabel = MakeLabelSmall(@"30 gen/s", NSMakeRect(x, y, 60, 18));
-    [bar addSubview:self.speedLabel];
-    x += 65;
-
-    [bar addSubview:MakeLabelSmall(@"Preset", NSMakeRect(x, y, 40, 18))];
-    x += 45;
-
-    presetsPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(x, y - 3, 110, 24)
-                                                pullsDown:NO];
+    presetsPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 110, 24) pullsDown:NO];
     [presetsPopup addItemWithTitle:@"Glider"];
     [presetsPopup addItemWithTitle:@"Blinker"];
     [presetsPopup addItemWithTitle:@"Block"];
@@ -2166,62 +2116,92 @@ static int paintCount;
     [presetsPopup addItemWithTitle:@"Acorn"];
     [presetsPopup setTarget:self];
     [presetsPopup setAction:@selector(rulePresetClicked:)];
-    [bar addSubview:presetsPopup];
-    x += 115;
+    presetName = MakeLabelSmall(@"Preset", NSZeroRect);
+    StackAdd(simRow, HGroup(presetName, presetsPopup, nil));
 
-    self.goButton = [[NSButton alloc] initWithFrame:NSMakeRect(x, y - 3, 52, 24)];
-    self.goButton.title = @"Go";
-    self.goButton.bezelStyle = NSBezelStyleRounded;
-    self.goButton.target = self;
-    self.goButton.action = @selector(goPause:);
-    [bar addSubview:self.goButton];
-    x += 57;
+    self.speedSlider = [[NSSlider alloc] initWithFrame:NSMakeRect(0, 0, 105, 20)];
+    self.speedSlider.minValue = 1.0;
+    self.speedSlider.maxValue = 600.0;
+    self.speedSlider.doubleValue = 30.0;
+    self.speedSlider.allowsTickMarkValuesOnly = NO;
+    self.speedSlider.numberOfTickMarks = 7;
+    self.speedSlider.continuous = YES;
+    self.speedSlider.target = self;
+    self.speedSlider.action = @selector(sliderChanged:);
+    self.speedSlider.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.speedSlider.widthAnchor constraintEqualToConstant:105.0].active = YES;
+    self.speedLabel = MakeLabelSmall(@"30 gen/s", NSZeroRect);
+    speedName = MakeLabelSmall(@"Speed", NSZeroRect);
+    StackAdd(simRow, HGroup(speedName, self.speedSlider, self.speedLabel));
 
-    randomButton = [[NSButton alloc] initWithFrame:NSMakeRect(x, y - 3, 70, 24)];
-    randomButton.title = @"Random";
-    randomButton.bezelStyle = NSBezelStyleRounded;
-    randomButton.target = self;
-    randomButton.action = @selector(randomize:);
-    [bar addSubview:randomButton];
-    x += 75;
+    self.densitySlider = [[NSSlider alloc] initWithFrame:NSMakeRect(0, 0, 90, 20)];
+    self.densitySlider.minValue = 0.0;
+    self.densitySlider.maxValue = 1.0;
+    self.densitySlider.doubleValue = 0.2;
+    self.densitySlider.allowsTickMarkValuesOnly = NO;
+    self.densitySlider.numberOfTickMarks = 0;
+    self.densitySlider.continuous = YES;
+    self.densitySlider.target = self;
+    self.densitySlider.action = @selector(sliderChanged:);
+    self.densitySlider.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.densitySlider.widthAnchor constraintEqualToConstant:90.0].active = YES;
+    self.densityPct = MakeLabelSmall(@"20%", NSZeroRect);
+    densityName = MakeLabelSmall(@"Density", NSZeroRect);
+    StackAdd(simRow, HGroup(densityName, self.densitySlider, self.densityPct));
 
-    clearButton = [[NSButton alloc] initWithFrame:NSMakeRect(x, y - 3, 58, 24)];
-    clearButton.title = @"Clear";
-    clearButton.bezelStyle = NSBezelStyleRounded;
-    clearButton.target = self;
-    clearButton.action = @selector(clear:);
-    [bar addSubview:clearButton];
-    x += 63;
+    [bar addArrangedSubview:simRow];
 
-    self.genLabel = MakeLabelSmall(@"Gen 0", NSMakeRect(x, y, 60, 18));
-    [bar addSubview:self.genLabel];
-    x += 70;
+    // --- Rule and view row. ---
+    viewRow = [[NSStackView alloc] init];
+    viewRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    viewRow.alignment = NSLayoutAttributeCenterY;
+    viewRow.spacing = 10.0;
 
-    self.hintLabel = MakeLabelSmall(@"L:add  R:erase", NSMakeRect(x, y, 105, 18));
-    [bar addSubview:self.hintLabel];
+    ruleName = MakeLabelSmall(@"Rule", NSZeroRect);
+    self.rulePopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 115, 24) pullsDown:NO];
+    {
+        int i;
+        for (i = 0; i < kFamousRuleCount; i++) {
+            NSString *title = [NSString stringWithUTF8String:kFamousRules[i].name];
+            if (title != nil) {
+                [self.rulePopup addItemWithTitle:title];
+            }
+        }
+        [self.rulePopup addItemWithTitle:@"Custom"];
+        [self.rulePopup selectItemAtIndex:0]; // Life
+        self.rulePopup.target = self;
+        self.rulePopup.action = @selector(rulePopupChanged:);
+    }
+    StackAdd(viewRow, HGroup(ruleName, self.rulePopup, nil));
 
-    y = 68;
-    x = 12;
+    self.ruleToggleView = [[GOLRuleToggleView alloc] initWithFrame:NSMakeRect(0, 0, 165, 34)];
+    self.ruleToggleView.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.ruleToggleView.widthAnchor constraintEqualToConstant:165.0].active = YES;
+    [self.ruleToggleView.heightAnchor constraintEqualToConstant:34.0].active = YES;
+    StackAdd(viewRow, self.ruleToggleView);
 
-    [bar addSubview:MakeLabelSmall(@"Display", NSMakeRect(x, y, 50, 18))];
-    x += 55;
+    self.ruleLabel = MakeLabel(@"B3/S23", NSZeroRect);
+    StackAdd(viewRow, self.ruleLabel);
 
-    self.displayPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(x, y - 3, 90, 24)
-                                                     pullsDown:NO];
+    separator = [[NSBox alloc] init];
+    separator.translatesAutoresizingMaskIntoConstraints = NO;
+    separator.boxType = NSBoxSeparator;
+    [separator.widthAnchor constraintEqualToConstant:1.0].active = YES;
+    StackAdd(viewRow, separator);
+    [separator.heightAnchor constraintEqualToAnchor:self.ruleToggleView.heightAnchor].active = YES;
+
+    displayName = MakeLabelSmall(@"Display", NSZeroRect);
+    self.displayPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 90, 24) pullsDown:NO];
     [self.displayPopup addItemWithTitle:@"Age"];
     [self.displayPopup addItemWithTitle:@"Trails"];
     [self.displayPopup addItemWithTitle:@"Heatmap"];
     [self.displayPopup selectItemAtIndex:0];
     self.displayPopup.target = self;
     self.displayPopup.action = @selector(displayChanged:);
-    [bar addSubview:self.displayPopup];
-    x += 100;
+    StackAdd(viewRow, HGroup(displayName, self.displayPopup, nil));
 
-    [bar addSubview:MakeLabelSmall(@"Palette", NSMakeRect(x, y, 50, 18))];
-    x += 55;
-
-    self.palettePopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(x, y - 3, 90, 24)
-                                                      pullsDown:NO];
+    paletteName = MakeLabelSmall(@"Palette", NSZeroRect);
+    self.palettePopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 90, 24) pullsDown:NO];
     [self.palettePopup addItemWithTitle:@"Viridis"];
     [self.palettePopup addItemWithTitle:@"Inferno"];
     [self.palettePopup addItemWithTitle:@"Plasma"];
@@ -2229,13 +2209,18 @@ static int paintCount;
     [self.palettePopup selectItemAtIndex:(int)self.palette];
     self.palettePopup.target = self;
     self.palettePopup.action = @selector(paletteChanged:);
-    [bar addSubview:self.palettePopup];
-    x += 100;
+    StackAdd(viewRow, HGroup(paletteName, self.palettePopup, nil));
 
-    [bar addSubview:MakeLabelSmall(@"Tool", NSMakeRect(x, y, 35, 18))];
-    x += 40;
+    self.glowButton = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 54, 24)];
+    self.glowButton.title = @"Glow";
+    [self.glowButton setButtonType:NSButtonTypeSwitch];
+    self.glowButton.state = self.glowOn ? NSControlStateValueOn : NSControlStateValueOff;
+    self.glowButton.target = self;
+    self.glowButton.action = @selector(glowToggle:);
+    StackAdd(viewRow, self.glowButton);
 
-    self.toolControl = [[NSSegmentedControl alloc] initWithFrame:NSMakeRect(x, y - 3, 90, 24)];
+    toolName = MakeLabelSmall(@"Tool", NSZeroRect);
+    self.toolControl = [[NSSegmentedControl alloc] initWithFrame:NSMakeRect(0, 0, 90, 24)];
     self.toolControl.segmentCount = 2;
     [self.toolControl setLabel:@"Add" forSegment:0];
     [self.toolControl setLabel:@"Erase" forSegment:1];
@@ -2243,13 +2228,11 @@ static int paintCount;
     self.toolControl.selectedSegment = 0;
     self.toolControl.target = self;
     self.toolControl.action = @selector(toolChanged:);
-    [bar addSubview:self.toolControl];
-    x += 100;
+    self.toolControl.toolTip = @"Left-click paints with the selected tool; right-click does the opposite. Option-drag or middle-drag pans.";
+    StackAdd(viewRow, HGroup(toolName, self.toolControl, nil));
 
-    [bar addSubview:MakeLabelSmall(@"Brush", NSMakeRect(x, y, 40, 18))];
-    x += 45;
-
-    self.brushSlider = [[NSSlider alloc] initWithFrame:NSMakeRect(x, y - 3, 90, 20)];
+    brushName = MakeLabelSmall(@"Brush", NSZeroRect);
+    self.brushSlider = [[NSSlider alloc] initWithFrame:NSMakeRect(0, 0, 90, 20)];
     self.brushSlider.minValue = 0.0;
     self.brushSlider.maxValue = 10.0;
     self.brushSlider.doubleValue = 1.0;
@@ -2258,30 +2241,79 @@ static int paintCount;
     self.brushSlider.continuous = YES;
     self.brushSlider.target = self;
     self.brushSlider.action = @selector(sliderChanged:);
-    [bar addSubview:self.brushSlider];
-    x += 100;
+    self.brushSlider.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.brushSlider.widthAnchor constraintEqualToConstant:90.0].active = YES;
+    self.brushLabel = MakeLabelSmall(@"1", NSZeroRect);
+    StackAdd(viewRow, HGroup(brushName, self.brushSlider, self.brushLabel));
 
-    self.brushLabel = MakeLabelSmall(@"1", NSMakeRect(x, y, 30, 18));
-    [bar addSubview:self.brushLabel];
-    x += 40;
+    zoomName = MakeLabelSmall(@"Zoom", NSZeroRect);
+    self.zoomLabel = MakeLabelSmall(@"100%", NSZeroRect);
+    StackAdd(viewRow, HGroup(zoomName, self.zoomLabel, nil));
 
-    [bar addSubview:MakeLabelSmall(@"Zoom", NSMakeRect(x, y, 35, 18))];
-    x += 40;
-
-    self.zoomLabel = MakeLabelSmall(@"100%", NSMakeRect(x, y, 55, 18));
-    [bar addSubview:self.zoomLabel];
-    x += 65;
-
-    fitButton = [[NSButton alloc] initWithFrame:NSMakeRect(x, y - 3, 50, 24)];
+    fitButton = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 50, 24)];
     fitButton.title = @"Fit";
     fitButton.bezelStyle = NSBezelStyleRounded;
     fitButton.target = self;
     fitButton.action = @selector(fit:);
-    [bar addSubview:fitButton];
-    x += 60;
+    StackAdd(viewRow, fitButton);
 
-    self.hoverLabel = MakeLabel(@"--", NSMakeRect(x, y, 145, 18));
-    [bar addSubview:self.hoverLabel];
+    [bar addArrangedSubview:viewRow];
+
+    // --- Status row: live readouts on the left, trend sparkline on the right. ---
+    statusRow = [[NSStackView alloc] init];
+    statusRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    statusRow.alignment = NSLayoutAttributeCenterY;
+    statusRow.spacing = 10.0;
+
+    self.fpsLabel = MakeLabelSmall(@"FPS --", NSZeroRect);
+    StackAdd(statusRow, self.fpsLabel);
+
+    self.genLabel = MakeLabelSmall(@"Gen 0", NSZeroRect);
+    StackAdd(statusRow, self.genLabel);
+
+    self.popLabel = MakeLabelSmall(@"Pop: 0", NSZeroRect);
+    StackAdd(statusRow, self.popLabel);
+
+    self.maxAgeLabel = MakeLabelSmall(@"Age: 0", NSZeroRect);
+    StackAdd(statusRow, self.maxAgeLabel);
+
+    self.hoverLabel = MakeLabelSmall(@"--", NSZeroRect);
+    self.hoverLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    [self.hoverLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    StackAdd(statusRow, self.hoverLabel);
+
+    spacer = [[NSView alloc] init];
+    [spacer setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [spacer setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    {
+        NSLayoutConstraint *w = [spacer.widthAnchor constraintEqualToConstant:0.0];
+        w.priority = NSLayoutPriorityDefaultLow;
+        w.active = YES;
+    }
+    [spacer.heightAnchor constraintEqualToConstant:1.0].active = YES;
+    StackAdd(statusRow, spacer);
+
+    trendName = MakeLabelSmall(@"Trend", NSZeroRect);
+    self.popSpark = [[GOLSparklineView alloc] initWithFrame:NSMakeRect(0, 0, 120, 24)];
+    self.popSpark.toolTip = @"Population over recent generations";
+    self.popSpark.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.popSpark.widthAnchor constraintEqualToConstant:120.0].active = YES;
+    [self.popSpark.heightAnchor constraintEqualToConstant:24.0].active = YES;
+    StackAdd(statusRow, HGroup(trendName, self.popSpark, nil));
+
+    [bar addArrangedSubview:statusRow];
+
+    // --- Pin the bar to the bottom; the Metal view fills the space above it. ---
+    [NSLayoutConstraint activateConstraints:@[
+        [bar.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:8.0],
+        [bar.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-8.0],
+        [bar.bottomAnchor constraintEqualToAnchor:contentView.bottomAnchor constant:-8.0],
+        [statusRow.widthAnchor constraintEqualToAnchor:bar.widthAnchor],
+        [self.mtkView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:8.0],
+        [self.mtkView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-8.0],
+        [self.mtkView.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:8.0],
+        [self.mtkView.bottomAnchor constraintEqualToAnchor:bar.topAnchor constant:-8.0]
+    ]];
 
     weakSelf = self;
     self.ruleToggleView.toggleChanged = ^{
@@ -2306,10 +2338,14 @@ static int paintCount;
 
     [self updateRuleUI];
     [self updateZoomLabel];
-    [self updateHintLabel];
     [self fitView];
     [self.window makeKeyAndOrderFront:nil];
     [self.window makeFirstResponder:self.mtkView];
+
+    // Let the bar size itself, then refuse to shrink below its full width so no
+    // control is ever clipped.
+    [bar layoutSubtreeIfNeeded];
+    self.window.minSize = NSMakeSize([bar fittingSize].width + 16.0, 400.0);
 }
 
 - (void)drawInMTKView:(MTKView *)view {

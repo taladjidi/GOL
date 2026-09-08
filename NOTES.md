@@ -61,9 +61,3 @@ would help.
 - **Cursor tooltip** near the pointer instead of only in the status bar.
 - **Non-wrapping edges** option (the torus is currently hard-coded in both the
   GPU kernel and `gol_step_cpu`).
-
-## Deferred — code quality (correctness/robustness, not features)
-
-- **Toolbar layout.** The toolbar is laid out with a manual x-cursor
-  (`main.m:1816+`). Fragile to label-width changes. An `NSStackView`/Auto Layout
-  pass would make it robust.
