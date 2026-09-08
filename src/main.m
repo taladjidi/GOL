@@ -147,6 +147,14 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     return l;
 }
 
+static NSTextField *MakeValueLabel(NSString *s, NSRect f) {
+    NSTextField *l = [NSTextField labelWithString:s];
+    l.frame = f;
+    l.font = [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular];
+    l.textColor = [NSColor secondaryLabelColor];
+    return l;
+}
+
 // Marks v for Auto Layout and appends it as an arranged subview of stack.
 static void StackAdd(NSStackView *stack, NSView *v) {
     v.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1361,14 +1369,14 @@ static int paintCount;
         self.genLabel.stringValue = [NSString stringWithFormat:@"Gen %u", self.gen];
     }
     if (self.popLabel != nil) {
-        self.popLabel.stringValue = [NSString stringWithFormat:@"Pop: %u", self.popAlive];
+        self.popLabel.stringValue = [NSString stringWithFormat:@"Pop %u", self.popAlive];
     }
     if (self.maxAgeLabel != nil) {
-        self.maxAgeLabel.stringValue = [NSString stringWithFormat:@"MaxAge: %u", self.popMaxAge];
+        self.maxAgeLabel.stringValue = [NSString stringWithFormat:@"Age %u", self.popMaxAge];
     }
     if (self.fpsLabel != nil) {
-        self.fpsLabel.stringValue = (self.fpsValue < 0) ? @"FPS --"
-            : [NSString stringWithFormat:@"FPS %d", self.fpsValue];
+        self.fpsLabel.stringValue = (self.fpsValue < 0) ? @"-- fps"
+            : [NSString stringWithFormat:@"%d fps", self.fpsValue];
     }
     if (self.popSpark != nil) {
         [self.popSpark setNeedsDisplay:YES];
@@ -2130,7 +2138,7 @@ static int paintCount;
     self.speedSlider.action = @selector(sliderChanged:);
     self.speedSlider.translatesAutoresizingMaskIntoConstraints = NO;
     [self.speedSlider.widthAnchor constraintEqualToConstant:105.0].active = YES;
-    self.speedLabel = MakeLabelSmall(@"30 gen/s", NSZeroRect);
+    self.speedLabel = MakeValueLabel(@"30 gen/s", NSZeroRect);
     speedName = MakeLabelSmall(@"Speed", NSZeroRect);
     StackAdd(simRow, HGroup(speedName, self.speedSlider, self.speedLabel));
 
@@ -2145,7 +2153,7 @@ static int paintCount;
     self.densitySlider.action = @selector(sliderChanged:);
     self.densitySlider.translatesAutoresizingMaskIntoConstraints = NO;
     [self.densitySlider.widthAnchor constraintEqualToConstant:90.0].active = YES;
-    self.densityPct = MakeLabelSmall(@"20%", NSZeroRect);
+    self.densityPct = MakeValueLabel(@"20%", NSZeroRect);
     densityName = MakeLabelSmall(@"Density", NSZeroRect);
     StackAdd(simRow, HGroup(densityName, self.densitySlider, self.densityPct));
 
@@ -2243,11 +2251,11 @@ static int paintCount;
     self.brushSlider.action = @selector(sliderChanged:);
     self.brushSlider.translatesAutoresizingMaskIntoConstraints = NO;
     [self.brushSlider.widthAnchor constraintEqualToConstant:90.0].active = YES;
-    self.brushLabel = MakeLabelSmall(@"1", NSZeroRect);
+    self.brushLabel = MakeValueLabel(@"1", NSZeroRect);
     StackAdd(viewRow, HGroup(brushName, self.brushSlider, self.brushLabel));
 
     zoomName = MakeLabelSmall(@"Zoom", NSZeroRect);
-    self.zoomLabel = MakeLabelSmall(@"100%", NSZeroRect);
+    self.zoomLabel = MakeValueLabel(@"100%", NSZeroRect);
     StackAdd(viewRow, HGroup(zoomName, self.zoomLabel, nil));
 
     fitButton = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 50, 24)];
@@ -2265,16 +2273,16 @@ static int paintCount;
     statusRow.alignment = NSLayoutAttributeCenterY;
     statusRow.spacing = 10.0;
 
-    self.fpsLabel = MakeLabelSmall(@"FPS --", NSZeroRect);
+    self.fpsLabel = MakeValueLabel(@"-- fps", NSZeroRect);
     StackAdd(statusRow, self.fpsLabel);
 
-    self.genLabel = MakeLabelSmall(@"Gen 0", NSZeroRect);
+    self.genLabel = MakeValueLabel(@"Gen 0", NSZeroRect);
     StackAdd(statusRow, self.genLabel);
 
-    self.popLabel = MakeLabelSmall(@"Pop: 0", NSZeroRect);
+    self.popLabel = MakeValueLabel(@"Pop 0", NSZeroRect);
     StackAdd(statusRow, self.popLabel);
 
-    self.maxAgeLabel = MakeLabelSmall(@"Age: 0", NSZeroRect);
+    self.maxAgeLabel = MakeValueLabel(@"Age 0", NSZeroRect);
     StackAdd(statusRow, self.maxAgeLabel);
 
     self.hoverLabel = MakeLabelSmall(@"--", NSZeroRect);
