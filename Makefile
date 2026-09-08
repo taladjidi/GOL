@@ -1,11 +1,13 @@
 CC = clang
-CFLAGS = -O3 -std=gnu11 -Weverything -Wno-poison-system-directories -arch arm64 -arch x86_64 -mmacosx-version-min=12.0
-OBJCFLAGS = -O3 -std=gnu11 -Weverything -fobjc-arc -fmodules -Wno-poison-system-directories -arch arm64 -arch x86_64 -mmacosx-version-min=12.0
+CFLAGS = -O3 -std=gnu11 -Weverything -Wno-poison-system-directories -arch arm64 -arch x86_64 -mmacosx-version-min=12.0 -MMD -MP
+OBJCFLAGS = -O3 -std=gnu11 -Weverything -fobjc-arc -fmodules -Wno-poison-system-directories -arch arm64 -arch x86_64 -mmacosx-version-min=12.0 -MMD -MP
 METALFLAGS = -Weverything -Wno-c++98-compat -Wno-deprecated -mmacosx-version-min=12.0
 FRAMEWORKS = -framework Cocoa -framework Metal -framework MetalKit -framework QuartzCore
 METAL_FRAMEWORKS = -framework Metal
 
 VERSION = 0.1.0
+
+.DEFAULT_GOAL := all
 
 all: bin/gol bin/default.metallib
 
@@ -15,16 +17,16 @@ bin:
 build:
 	@mkdir -p build
 
-build/gol.o: src/gol.c src/gol.h | build
+build/gol.o: src/gol.c | build
 	$(CC) $(CFLAGS) -Isrc -c src/gol.c -o $@
 
-build/main.o: src/main.m src/gol.h | build
+build/main.o: src/main.m | build
 	$(CC) $(OBJCFLAGS) -Isrc -c src/main.m -o $@
 
-build/gol_test.o: tests/gol_test.c src/gol.h | build
+build/gol_test.o: tests/gol_test.c | build
 	$(CC) $(CFLAGS) -Isrc -c tests/gol_test.c -o $@
 
-build/ref_test.o: tests/ref_test.c src/gol.h tests/refstep.h | build
+build/ref_test.o: tests/ref_test.c | build
 	$(CC) $(CFLAGS) -Isrc -c tests/ref_test.c -o $@
 
 build/gol_test: build/gol_test.o build/gol.o | build
@@ -33,7 +35,7 @@ build/gol_test: build/gol_test.o build/gol.o | build
 build/ref_test: build/ref_test.o build/gol.o | build
 	$(CC) $(CFLAGS) $^ -o $@
 
-build/metal_test.o: tests/metal_test.m src/gol.h tests/refstep.h | build
+build/metal_test.o: tests/metal_test.m | build
 	$(CC) $(OBJCFLAGS) -Isrc -c tests/metal_test.m -o $@
 
 build/metal_test: build/metal_test.o build/gol.o | build
@@ -102,7 +104,7 @@ dist: app
 	hdiutil create -volname "GOL" -srcfolder build/dmg -ov -format UDZO dist/GOL-$(VERSION).dmg
 	rm -rf build/dmg
 
-test: build/gol_test build/ref_test build/metal_test bin/default.metallib
+test: all build/gol_test build/ref_test build/metal_test bin/default.metallib
 	./build/gol_test
 	./build/ref_test
 	./build/metal_test bin/default.metallib
@@ -114,4 +116,12 @@ clean:
 distclean: clean
 	rm -rf dist
 
-.PHONY: all app run run-bare notarize dist clean distclean test
+# Install the bare binary to /usr/local/bin (also builds the app bundle).
+install: app /usr/local/bin/gol
+
+/usr/local/bin/gol: bin/gol
+	cp $< $@
+
+.PHONY: all app run run-bare notarize dist clean distclean install test
+
+-include $(wildcard build/*.d)
