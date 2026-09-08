@@ -155,6 +155,16 @@ static NSTextField *MakeValueLabel(NSString *s, NSRect f) {
     return l;
 }
 
+// Adds a menu item. The modifier mask only applies when key is non-empty.
+static NSMenuItem *MakeMenuItem(NSMenu *menu, NSString *title, SEL action,
+                                NSString *key, NSUInteger mask) {
+    NSMenuItem *item = [menu addItemWithTitle:title action:action keyEquivalent:key];
+    if (key.length > 0) {
+        item.keyEquivalentModifierMask = (NSEventModifierFlags)mask;
+    }
+    return item;
+}
+
 // Marks v for Auto Layout and appends it as an arranged subview of stack.
 static void StackAdd(NSStackView *stack, NSView *v) {
     v.translatesAutoresizingMaskIntoConstraints = NO;
@@ -548,13 +558,14 @@ static int paintCount;
 @property (nonatomic, assign) BOOL glowOn;
 @property (nonatomic, strong) NSPopUpButton *displayPopup;
 @property (nonatomic, strong) NSPopUpButton *palettePopup;
+@property (nonatomic, strong) NSArray<NSMenuItem *> *displayItems;
+@property (nonatomic, strong) NSArray<NSMenuItem *> *paletteItems;
 @property (nonatomic, strong) NSButton *glowButton;
 @property (nonatomic, strong) NSSegmentedControl *toolControl;
 @property (nonatomic, strong) NSSlider *brushSlider;
 @property (nonatomic, strong) NSTextField *brushLabel;
 @property (nonatomic, strong) NSTextField *zoomLabel;
 @property (nonatomic, strong) NSTextField *hoverLabel;
-@property (nonatomic, strong) id keyMonitor;
 @property (nonatomic, copy) NSString *screenshotPath;
 @property (nonatomic, assign) int screenshotGen;
 @property (nonatomic, assign) int screenshotSize;
@@ -562,6 +573,7 @@ static int paintCount;
 
 - (BOOL)setupMetal;
 - (void)setupUI;
+- (void)buildMenus;
 - (void)randomize;
 - (void)randomize:(id)sender;
 - (void)goPause:(id)sender;
@@ -573,19 +585,24 @@ static int paintCount;
 - (void)updateZoomLabel;
 - (void)toolChanged:(id)sender;
 - (void)displayChanged:(id)sender;
+- (void)setDisplayModeIndex:(NSInteger)index;
+- (void)displayMenuClicked:(id)sender;
 - (void)paletteChanged:(id)sender;
+- (void)setPaletteIndex:(NSInteger)index;
+- (void)paletteMenuClicked:(id)sender;
 - (void)glowToggle:(id)sender;
 - (void)clearTrailNow;
 - (void)beginPanAtEvent:(NSEvent *)e;
 - (void)panWithEvent:(NSEvent *)e;
 - (void)endPan;
 - (void)zoomAtEvent:(NSEvent *)e;
+- (void)zoomBy:(id)sender;
 - (void)hoverAtEvent:(NSEvent *)e;
 - (void)hoverExited;
 - (void)updateHoverAtPoint:(NSPoint)pt;
 - (NSPoint)topPointForEvent:(NSEvent *)e;
 - (BOOL)gridCellAtPoint:(NSPoint)pt col:(int *)outCol row:(int *)outRow;
-- (BOOL)handleKey:(NSEvent *)event;
+- (BOOL)validateMenuItem:(NSMenuItem *)item;
 - (void)sliderChanged:(id)sender;
 - (void)paintAtEvent:(NSEvent *)e add:(BOOL)add;
 - (void)applyPaintQueue;
@@ -795,13 +812,14 @@ static int paintCount;
 @synthesize glowOn = _glowOn;
 @synthesize displayPopup = _displayPopup;
 @synthesize palettePopup = _palettePopup;
+@synthesize displayItems = _displayItems;
+@synthesize paletteItems = _paletteItems;
 @synthesize glowButton = _glowButton;
 @synthesize toolControl = _toolControl;
 @synthesize brushSlider = _brushSlider;
 @synthesize brushLabel = _brushLabel;
 @synthesize zoomLabel = _zoomLabel;
 @synthesize hoverLabel = _hoverLabel;
-@synthesize keyMonitor = _keyMonitor;
 @synthesize screenshotPath = _screenshotPath;
 @synthesize screenshotGen = _screenshotGen;
 @synthesize screenshotSize = _screenshotSize;
@@ -861,16 +879,16 @@ static int paintCount;
     if (runSet) { self.running = run != 0; }
     if (mode != nil && mode.length > 0) {
         NSString *m = [mode lowercaseString];
-        if ([m isEqualToString:@"age"]) self.displayMode = DISPLAY_AGE;
-        else if ([m isEqualToString:@"trails"]) self.displayMode = DISPLAY_TRAILS;
-        else if ([m isEqualToString:@"heatmap"]) self.displayMode = DISPLAY_HEATMAP;
+        if ([m isEqualToString:@"age"]) [self setDisplayModeIndex:(NSInteger)DISPLAY_AGE];
+        else if ([m isEqualToString:@"trails"]) [self setDisplayModeIndex:(NSInteger)DISPLAY_TRAILS];
+        else if ([m isEqualToString:@"heatmap"]) [self setDisplayModeIndex:(NSInteger)DISPLAY_HEATMAP];
     }
     if (palette != nil && palette.length > 0) {
         NSString *p = [palette lowercaseString];
-        if ([p isEqualToString:@"inferno"]) self.palette = PALETTE_INFERNO;
-        else if ([p isEqualToString:@"plasma"]) self.palette = PALETTE_PLASMA;
-        else if ([p isEqualToString:@"turbo"]) self.palette = PALETTE_TURBO;
-        else self.palette = PALETTE_VIRIDIS;
+        if ([p isEqualToString:@"inferno"]) [self setPaletteIndex:(NSInteger)PALETTE_INFERNO];
+        else if ([p isEqualToString:@"plasma"]) [self setPaletteIndex:(NSInteger)PALETTE_PLASMA];
+        else if ([p isEqualToString:@"turbo"]) [self setPaletteIndex:(NSInteger)PALETTE_TURBO];
+        else [self setPaletteIndex:(NSInteger)PALETTE_VIRIDIS];
     }
     self.launchPreset = preset;
     if (screenshot != nil && screenshot.length > 0) {
@@ -887,9 +905,6 @@ static int paintCount;
 
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
     CFTimeInterval now;
-    NSMenu *mainMenu;
-    NSMenuItem *appItem;
-    NSMenu *appMenu;
     NSRunLoop *runLoop;
     (void)note;
     now = CFAbsoluteTimeGetCurrent();
@@ -925,6 +940,7 @@ static int paintCount;
         [NSApp terminate:nil];
         return;
     }
+    [self buildMenus];
     [self setupUI];
     [self applyLaunchConfig];
 
@@ -940,12 +956,113 @@ static int paintCount;
                                              repeats:YES];
     runLoop = [NSRunLoop mainRunLoop];
     [runLoop addTimer:self.statsTimer forMode:NSRunLoopCommonModes];
+}
 
-    mainMenu = [NSMenu new];
-    appItem = [mainMenu addItemWithTitle:@"" action:nil keyEquivalent:@""];
-    appMenu = [NSMenu new];
-    [appMenu addItemWithTitle:@"Quit GOL" action:@selector(terminate:) keyEquivalent:@"q"];
-    appItem.submenu = appMenu;
+- (void)buildMenus {
+    NSMenu *mainMenu;
+    NSMenuItem *item;
+    NSMenu *appMenu;
+    NSMenu *simMenu;
+    NSMenu *viewMenu;
+    NSMenu *paletteMenu;
+    NSMenu *windowMenu;
+    NSMutableArray<NSMenuItem *> *displayItems;
+    NSMutableArray<NSMenuItem *> *paletteItems;
+
+    mainMenu = [[NSMenu alloc] init];
+
+    // App menu.
+    item = [mainMenu addItemWithTitle:@"" action:nil keyEquivalent:@""];
+    appMenu = [[NSMenu alloc] init];
+    item.submenu = appMenu;
+    MakeMenuItem(appMenu, @"About GOL", @selector(orderFrontStandardAboutPanel:), @"", 0);
+    [appMenu addItem:[NSMenuItem separatorItem]];
+    MakeMenuItem(appMenu, @"Hide GOL", @selector(hide:), @"h", NSEventModifierFlagCommand);
+    MakeMenuItem(appMenu, @"Hide Others", @selector(hideOtherApplications:), @"h",
+                 NSEventModifierFlagCommand | NSEventModifierFlagOption);
+    MakeMenuItem(appMenu, @"Show All", @selector(unhideAllApplications:), @"", 0);
+    [appMenu addItem:[NSMenuItem separatorItem]];
+    MakeMenuItem(appMenu, @"Quit GOL", @selector(terminate:), @"q", NSEventModifierFlagCommand);
+
+    // Simulation menu.
+    item = [mainMenu addItemWithTitle:@"Simulation" action:nil keyEquivalent:@""];
+    simMenu = [[NSMenu alloc] init];
+    item.submenu = simMenu;
+    item = MakeMenuItem(simMenu, @"Go", @selector(goPause:), @" ", 0);
+    item.target = self;
+    item = MakeMenuItem(simMenu, @"Step", @selector(stepOnce:), @".", 0);
+    item.target = self;
+    [simMenu addItem:[NSMenuItem separatorItem]];
+    item = MakeMenuItem(simMenu, @"Random", @selector(randomize:), @"z", 0);
+    item.target = self;
+    item = MakeMenuItem(simMenu, @"Clear", @selector(clear:), @"r", 0);
+    item.target = self;
+    [simMenu addItem:[NSMenuItem separatorItem]];
+    item = MakeMenuItem(simMenu, @"Fit", @selector(fit:), @"f", 0);
+    item.target = self;
+    item = MakeMenuItem(simMenu, @"Fit", @selector(fit:), @"0", 0);
+    item.target = self;
+    item.hidden = YES;
+
+    // View menu.
+    item = [mainMenu addItemWithTitle:@"View" action:nil keyEquivalent:@""];
+    viewMenu = [[NSMenu alloc] init];
+    item.submenu = viewMenu;
+    displayItems = [NSMutableArray array];
+    item = MakeMenuItem(viewMenu, @"Age", @selector(displayMenuClicked:), @"1", 0);
+    item.target = self;
+    item.tag = (int)DISPLAY_AGE;
+    [displayItems addObject:item];
+    item = MakeMenuItem(viewMenu, @"Trails", @selector(displayMenuClicked:), @"2", 0);
+    item.target = self;
+    item.tag = (int)DISPLAY_TRAILS;
+    [displayItems addObject:item];
+    item = MakeMenuItem(viewMenu, @"Heatmap", @selector(displayMenuClicked:), @"3", 0);
+    item.target = self;
+    item.tag = (int)DISPLAY_HEATMAP;
+    [displayItems addObject:item];
+    self.displayItems = displayItems;
+
+    item = [viewMenu addItemWithTitle:@"Palette" action:nil keyEquivalent:@""];
+    paletteMenu = [[NSMenu alloc] init];
+    item.submenu = paletteMenu;
+    paletteItems = [NSMutableArray array];
+    item = MakeMenuItem(paletteMenu, @"Viridis", @selector(paletteMenuClicked:), @"", 0);
+    item.target = self;
+    item.tag = (int)PALETTE_VIRIDIS;
+    [paletteItems addObject:item];
+    item = MakeMenuItem(paletteMenu, @"Inferno", @selector(paletteMenuClicked:), @"", 0);
+    item.target = self;
+    item.tag = (int)PALETTE_INFERNO;
+    [paletteItems addObject:item];
+    item = MakeMenuItem(paletteMenu, @"Plasma", @selector(paletteMenuClicked:), @"", 0);
+    item.target = self;
+    item.tag = (int)PALETTE_PLASMA;
+    [paletteItems addObject:item];
+    item = MakeMenuItem(paletteMenu, @"Turbo", @selector(paletteMenuClicked:), @"", 0);
+    item.target = self;
+    item.tag = (int)PALETTE_TURBO;
+    [paletteItems addObject:item];
+    self.paletteItems = paletteItems;
+
+    item = MakeMenuItem(viewMenu, @"Glow", @selector(glowToggle:), @"g", 0);
+    item.target = self;
+    [viewMenu addItem:[NSMenuItem separatorItem]];
+    item = MakeMenuItem(viewMenu, @"Zoom In", @selector(zoomBy:), @"+", NSEventModifierFlagCommand);
+    item.target = self;
+    item.tag = 1;
+    item = MakeMenuItem(viewMenu, @"Zoom Out", @selector(zoomBy:), @"-", NSEventModifierFlagCommand);
+    item.target = self;
+    item.tag = 2;
+
+    // Window menu.
+    item = [mainMenu addItemWithTitle:@"Window" action:nil keyEquivalent:@""];
+    windowMenu = [[NSMenu alloc] init];
+    item.submenu = windowMenu;
+    MakeMenuItem(windowMenu, @"Close", @selector(performClose:), @"w", NSEventModifierFlagCommand);
+    MakeMenuItem(windowMenu, @"Minimize", @selector(performMiniaturize:), @"m", NSEventModifierFlagCommand);
+    NSApp.windowsMenu = windowMenu;
+
     NSApp.mainMenu = mainMenu;
 }
 
@@ -1561,34 +1678,60 @@ static int paintCount;
 }
 
 - (void)displayChanged:(id)sender {
-    int index;
     (void)sender;
     if (self.displayPopup == nil) {
         return;
     }
-    index = (int)self.displayPopup.indexOfSelectedItem;
+    [self setDisplayModeIndex:self.displayPopup.indexOfSelectedItem];
+}
+
+- (void)setDisplayModeIndex:(NSInteger)index {
+    NSUInteger i;
     if (index < 0 || index > (int)DISPLAY_HEATMAP) {
-        index = 0;
+        return;
     }
     self.displayMode = (uint32_t)index;
     if (self.displayMode == DISPLAY_TRAILS) {
         [self clearTrailNow];
     }
+    if (self.displayPopup != nil) {
+        [self.displayPopup selectItemAtIndex:index];
+    }
+    for (i = 0; i < self.displayItems.count; i++) {
+        self.displayItems[i].state = (i == (NSUInteger)index) ? NSControlStateValueOn : NSControlStateValueOff;
+    }
     [self markDirty];
 }
 
+- (void)displayMenuClicked:(id)sender {
+    [self setDisplayModeIndex:((NSMenuItem *)sender).tag];
+}
+
 - (void)paletteChanged:(id)sender {
-    int index;
     (void)sender;
     if (self.palettePopup == nil) {
         return;
     }
-    index = (int)self.palettePopup.indexOfSelectedItem;
+    [self setPaletteIndex:self.palettePopup.indexOfSelectedItem];
+}
+
+- (void)setPaletteIndex:(NSInteger)index {
+    NSUInteger i;
     if (index < 0 || index > (int)PALETTE_TURBO) {
-        index = 0;
+        return;
     }
     self.palette = (uint32_t)index;
+    if (self.palettePopup != nil) {
+        [self.palettePopup selectItemAtIndex:index];
+    }
+    for (i = 0; i < self.paletteItems.count; i++) {
+        self.paletteItems[i].state = (i == (NSUInteger)index) ? NSControlStateValueOn : NSControlStateValueOff;
+    }
     [self markDirty];
+}
+
+- (void)paletteMenuClicked:(id)sender {
+    [self setPaletteIndex:((NSMenuItem *)sender).tag];
 }
 
 - (void)glowToggle:(id)sender {
@@ -1690,6 +1833,32 @@ static int paintCount;
     [self requestGridResize];
 }
 
+- (void)zoomBy:(id)sender {
+    NSRect bounds;
+    double factor;
+    double gx;
+    double gy;
+    double newCellPx;
+
+    if (self.mtkView == nil || self.cellPx < 0.01) {
+        return;
+    }
+    bounds = [self.mtkView bounds];
+    if (bounds.size.width < 1.0 || bounds.size.height < 1.0) {
+        return;
+    }
+    factor = (((NSMenuItem *)sender).tag == 1) ? 2.0 : 0.5;
+    gx = (bounds.size.width / 2.0 - self.viewOffsetX) / self.cellPx;
+    gy = (bounds.size.height / 2.0 - self.viewOffsetY) / self.cellPx;
+    newCellPx = (double)self.cellPx * factor;
+    newCellPx = ClampDouble(newCellPx, (double)MIN_CELL_PX, (double)MAX_CELL_PX);
+    self.cellPx = (CGFloat)newCellPx;
+    self.viewOffsetX = bounds.size.width / 2.0 - (CGFloat)gx * self.cellPx;
+    self.viewOffsetY = bounds.size.height / 2.0 - (CGFloat)gy * self.cellPx;
+    [self updateZoomLabel];
+    [self requestGridResize];
+}
+
 - (void)hoverAtEvent:(NSEvent *)e {
     NSPoint pt;
     pt = [self topPointForEvent:e];
@@ -1734,42 +1903,15 @@ static int paintCount;
     self.hoverLabel.stringValue = text;
 }
 
-- (BOOL)handleKey:(NSEvent *)event {
-    NSEventModifierFlags flags;
-    NSString *ch;
-
-    flags = event.modifierFlags;
-    if ((flags & (NSEventModifierFlagCommand | NSEventModifierFlagControl)) != 0) {
-        return NO;
+- (BOOL)validateMenuItem:(NSMenuItem *)item {
+    if (item.action == @selector(goPause:)) {
+        item.title = self.running ? @"Pause" : @"Go";
+    } else if (item.action == @selector(displayMenuClicked:)) {
+        item.state = (item.tag == (NSInteger)self.displayMode) ? NSControlStateValueOn : NSControlStateValueOff;
+    } else if (item.action == @selector(paletteMenuClicked:)) {
+        item.state = (item.tag == (NSInteger)self.palette) ? NSControlStateValueOn : NSControlStateValueOff;
     }
-    if ([self.window firstResponder] != self.mtkView) {
-        return NO;
-    }
-    ch = [event.charactersIgnoringModifiers lowercaseString];
-    if (ch == nil || ch.length == 0) {
-        return NO;
-    }
-    if ([ch isEqualToString:@" "]) {
-        [self goPause:nil];
-        return YES;
-    }
-    if ([ch isEqualToString:@"r"]) {
-        [self clear];
-        return YES;
-    }
-    if ([ch isEqualToString:@"z"]) {
-        [self randomize];
-        return YES;
-    }
-    if ([ch isEqualToString:@"g"]) {
-        [self glowToggle:nil];
-        return YES;
-    }
-    if ([ch isEqualToString:@"f"] || [ch isEqualToString:@"0"]) {
-        [self fitView];
-        return YES;
-    }
-    return NO;
+    return YES;
 }
 
 - (void)sliderChanged:(id)sender {
@@ -2368,15 +2510,6 @@ static int paintCount;
             [strongSelf updateRuleUI];
         }
     };
-
-    self.keyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
-                                                           handler:^NSEvent *(NSEvent *event) {
-        App *strongSelf = weakSelf;
-        if (strongSelf != nil && [strongSelf handleKey:event]) {
-            return nil;
-        }
-        return event;
-    }];
 
     [self updateRuleUI];
     [self updateZoomLabel];
@@ -3217,10 +3350,6 @@ static int paintCount;
     if (self.statsTimer != nil) {
         [self.statsTimer invalidate];
         self.statsTimer = nil;
-    }
-    if (self.keyMonitor != nil) {
-        [NSEvent removeMonitor:self.keyMonitor];
-        self.keyMonitor = nil;
     }
 }
 

@@ -112,16 +112,23 @@ Example:
 | Option + left drag, or middle drag | Pan the camera |
 | Hover | Shows cell coordinates and age in the status bar |
 
-### Keyboard (with the canvas focused)
+### Keyboard
+
+Menu key equivalents, so they work no matter which control has focus.
 
 | Key | Effect |
 | --- | --- |
 | `Space` | Pause / resume |
 | `.` | Advance one generation |
-| `R` | Clear the grid |
-| `Z` | Randomize the grid |
-| `G` | Toggle glow / bloom |
-| `F` or `0` | Fit the pattern to the window |
+| `r` | Clear the grid |
+| `z` | Randomize the grid |
+| `g` | Toggle glow / bloom |
+| `f` or `0` | Fit the pattern to the window |
+| `1` / `2` / `3` | Display mode: Age / Trails / Heatmap |
+| Cmd+`+` / Cmd+`-` | Zoom in / out about the view center |
+| Cmd+Q | Quit |
+| Cmd+W | Close the window (quits) |
+| Cmd+M | Minimize |
 
 ### Toolbar
 
