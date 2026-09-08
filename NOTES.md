@@ -54,9 +54,6 @@ would help.
 
 ## Deferred — gameplay / UX
 
-- **Step button** (advance exactly one generation, for studying oscillators).
-  Not requested in the last pass; the `Space`/`R`/`Z`/`G`/`F` keys exist but
-  there's no single-step button.
 - **Save / Load** patterns (RLE and/or PNG).
 - **Cursor tooltip** near the pointer instead of only in the status bar.
 - **Non-wrapping edges** option (the torus is currently hard-coded in both the

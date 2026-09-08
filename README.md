@@ -117,6 +117,7 @@ Example:
 | Key | Effect |
 | --- | --- |
 | `Space` | Pause / resume |
+| `.` | Advance one generation |
 | `R` | Clear the grid |
 | `Z` | Randomize the grid |
 | `G` | Toggle glow / bloom |
@@ -133,7 +134,8 @@ Example:
   generations run per frame, so the maximum is no longer bound by refresh rate.
 - **Preset**: drop-down of classic patterns; applying one clears the grid and
   places the pattern.
-- **Go / Random / Clear**: run/pause, seed a random soup, and wipe the grid.
+- **Go / Step / Random / Clear**: run/pause, advance one generation, seed a
+  random soup, and wipe the grid.
 - **Display**: Age, Trails, or Heatmap.
 - **Palette**: Viridis, Inferno, Plasma, or Turbo.
 - **Tool**: Add or Erase (right-drag always does the opposite).

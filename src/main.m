@@ -507,6 +507,7 @@ static int paintCount;
 @property (nonatomic, assign) NSUInteger planeCells;
 @property (nonatomic, assign) NSUInteger planeBytes;
 @property (nonatomic, assign) BOOL running;
+@property (nonatomic, assign) BOOL stepOnce;
 @property (nonatomic, assign) BOOL dirty;
 @property (nonatomic, assign) BOOL needsGridResize;
 @property (nonatomic, assign) uint32_t gen;
@@ -564,6 +565,7 @@ static int paintCount;
 - (void)randomize;
 - (void)randomize:(id)sender;
 - (void)goPause:(id)sender;
+- (void)stepOnce:(id)sender;
 - (void)clear:(id)sender;
 - (void)clear;
 - (void)fit:(id)sender;
@@ -752,6 +754,7 @@ static int paintCount;
 @synthesize planeCells = _planeCells;
 @synthesize planeBytes = _planeBytes;
 @synthesize running = _running;
+@synthesize stepOnce = _stepOnce;
 @synthesize dirty = _dirty;
 @synthesize needsGridResize = _needsGridResize;
 @synthesize gen = _gen;
@@ -1293,12 +1296,20 @@ static int paintCount;
         return;
     }
     self.running = !self.running;
-    self.goButton.title = self.running ? @"Pause" : @"Go";
+    self.goButton.image = [NSImage imageWithSystemSymbolName:(self.running ? @"pause.fill" : @"play.fill")
+                                          accessibilityDescription:(self.running ? @"Pause" : @"Go")];
+    self.goButton.toolTip = self.running ? @"Pause" : @"Go";
     if (self.running) {
         self.mtkView.paused = NO;
     } else if (!self.dirty) {
         self.mtkView.paused = YES;
     }
+}
+
+- (void)stepOnce:(id)sender {
+    (void)sender;
+    self.stepOnce = YES;
+    [self markDirty];
 }
 
 - (void)clear:(id)sender {
@@ -2031,6 +2042,7 @@ static int paintCount;
     NSStackView *statusRow;
     NSButton *clearButton;
     NSButton *randomButton;
+    NSButton *stepButton;
     NSButton *fitButton;
     NSPopUpButton *presetsPopup;
     NSTextField *presetName;
@@ -2088,24 +2100,42 @@ static int paintCount;
     simRow.alignment = NSLayoutAttributeCenterY;
     simRow.spacing = 10.0;
 
-    self.goButton = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 52, 24)];
+    self.goButton = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 32, 24)];
     self.goButton.title = @"Go";
-    self.goButton.bezelStyle = NSBezelStyleRounded;
+    self.goButton.image = [NSImage imageWithSystemSymbolName:@"play.fill" accessibilityDescription:@"Go"];
+    self.goButton.imagePosition = NSImageOnly;
+    self.goButton.bezelStyle = NSBezelStyleTexturedRounded;
+    self.goButton.toolTip = @"Go";
     self.goButton.target = self;
     self.goButton.action = @selector(goPause:);
     StackAdd(simRow, self.goButton);
-    // The Step button lands here in 1.4, between Go and Random.
 
-    randomButton = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 70, 24)];
+    stepButton = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 32, 24)];
+    stepButton.title = @"Step";
+    stepButton.image = [NSImage imageWithSystemSymbolName:@"forward.frame.fill" accessibilityDescription:@"Step"];
+    stepButton.imagePosition = NSImageOnly;
+    stepButton.bezelStyle = NSBezelStyleTexturedRounded;
+    stepButton.toolTip = @"Step";
+    stepButton.target = self;
+    stepButton.action = @selector(stepOnce:);
+    StackAdd(simRow, stepButton);
+
+    randomButton = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 32, 24)];
     randomButton.title = @"Random";
-    randomButton.bezelStyle = NSBezelStyleRounded;
+    randomButton.image = [NSImage imageWithSystemSymbolName:@"dice.fill" accessibilityDescription:@"Random"];
+    randomButton.imagePosition = NSImageOnly;
+    randomButton.bezelStyle = NSBezelStyleTexturedRounded;
+    randomButton.toolTip = @"Random";
     randomButton.target = self;
     randomButton.action = @selector(randomize:);
     StackAdd(simRow, randomButton);
 
-    clearButton = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 58, 24)];
+    clearButton = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 32, 24)];
     clearButton.title = @"Clear";
-    clearButton.bezelStyle = NSBezelStyleRounded;
+    clearButton.image = [NSImage imageWithSystemSymbolName:@"trash" accessibilityDescription:@"Clear"];
+    clearButton.imagePosition = NSImageOnly;
+    clearButton.bezelStyle = NSBezelStyleTexturedRounded;
+    clearButton.toolTip = @"Clear";
     clearButton.target = self;
     clearButton.action = @selector(clear:);
     StackAdd(simRow, clearButton);
@@ -2258,9 +2288,13 @@ static int paintCount;
     self.zoomLabel = MakeValueLabel(@"100%", NSZeroRect);
     StackAdd(viewRow, HGroup(zoomName, self.zoomLabel, nil));
 
-    fitButton = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 50, 24)];
+    fitButton = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 32, 24)];
     fitButton.title = @"Fit";
-    fitButton.bezelStyle = NSBezelStyleRounded;
+    fitButton.image = [NSImage imageWithSystemSymbolName:@"arrow.up.left.and.arrow.down.right"
+                              accessibilityDescription:@"Fit"];
+    fitButton.imagePosition = NSImageOnly;
+    fitButton.bezelStyle = NSBezelStyleTexturedRounded;
+    fitButton.toolTip = @"Fit";
     fitButton.target = self;
     fitButton.action = @selector(fit:);
     StackAdd(viewRow, fitButton);
@@ -2940,97 +2974,102 @@ static int paintCount;
         gensToAdvance = FloorInt(self.genAccum / genInterval);
         gensToAdvance = GOL_MIN(gensToAdvance, 5);
         self.genAccum -= (double)gensToAdvance * genInterval;
+    }
 
-        if (gensToAdvance > 0 && self.stepPipeline != nil) {
-            // Each dispatch advances the data by one plane (cur -> A -> B ->
-            // cur ...), so after N steps the latest generation sits on
-            // (curPlane + N) % 3, keeping displayPlane == frameIndex % 3.
-            planeA = (curPlane + 1) % (uint32_t)PLANE_COUNT;
-            planeB = (curPlane + 2) % (uint32_t)PLANE_COUNT;
-            // The buffer touches every plane, so all three ring slots must be
-            // done before we may reuse them.
-            oldest = [self cbAt:slot];
+    if (self.stepOnce) {
+        gensToAdvance = 1;
+        self.stepOnce = NO;
+    }
+
+    if (gensToAdvance > 0 && self.stepPipeline != nil) {
+        // Each dispatch advances the data by one plane (cur -> A -> B ->
+        // cur ...), so after N steps the latest generation sits on
+        // (curPlane + N) % 3, keeping displayPlane == frameIndex % 3.
+        planeA = (curPlane + 1) % (uint32_t)PLANE_COUNT;
+        planeB = (curPlane + 2) % (uint32_t)PLANE_COUNT;
+        // The buffer touches every plane, so all three ring slots must be
+        // done before we may reuse them.
+        oldest = [self cbAt:slot];
+        oldestDone = (oldest == nil) ||
+                      oldest.status == MTLCommandBufferStatusCompleted ||
+                      oldest.status == MTLCommandBufferStatusError;
+        if (oldestDone) {
+            oldest = [self cbAt:planeA];
             oldestDone = (oldest == nil) ||
                           oldest.status == MTLCommandBufferStatusCompleted ||
                           oldest.status == MTLCommandBufferStatusError;
-            if (oldestDone) {
-                oldest = [self cbAt:planeA];
-                oldestDone = (oldest == nil) ||
-                              oldest.status == MTLCommandBufferStatusCompleted ||
-                              oldest.status == MTLCommandBufferStatusError;
+        }
+        if (oldestDone) {
+            oldest = [self cbAt:planeB];
+            oldestDone = (oldest == nil) ||
+                          oldest.status == MTLCommandBufferStatusCompleted ||
+                          oldest.status == MTLCommandBufferStatusError;
+        }
+        if (oldestDone) {
+            s = (GOLStats *)[self.statsBuf contents];
+            for (plane = 0; plane < (uint32_t)PLANE_COUNT; plane++) {
+                memset(&s[plane], 0, sizeof(GOLStats));
             }
-            if (oldestDone) {
-                oldest = [self cbAt:planeB];
-                oldestDone = (oldest == nil) ||
-                              oldest.status == MTLCommandBufferStatusCompleted ||
-                              oldest.status == MTLCommandBufferStatusError;
-            }
-            if (oldestDone) {
-                s = (GOLStats *)[self.statsBuf contents];
-                for (plane = 0; plane < (uint32_t)PLANE_COUNT; plane++) {
-                    memset(&s[plane], 0, sizeof(GOLStats));
-                }
-                tgW = 16;
-                tgH = 16;
-                gx = ((NSUInteger)self.gridW + tgW - 1) / tgW;
-                gy = ((NSUInteger)self.gridH + tgH - 1) / tgH;
-                enc = [cb computeCommandEncoder];
-                [enc setComputePipelineState:self.stepPipeline];
-                for (stepIdx = 1; stepIdx <= gensToAdvance; stepIdx++) {
-                    readPlane = (curPlane + (uint32_t)(stepIdx - 1)) %
-                                (uint32_t)PLANE_COUNT;
-                    wp = (curPlane + (uint32_t)stepIdx) % (uint32_t)PLANE_COUNT;
-                    [enc setBuffer:self.gridBuf
-                           offset:(NSUInteger)readPlane * self.planeBytes
-                          atIndex:0];
-                    [enc setBuffer:self.gridBuf
-                           offset:(NSUInteger)wp * self.planeBytes
-                          atIndex:1];
-                    [enc setBuffer:self.uniformsBuf offset:0 atIndex:2];
-                    [enc setBuffer:self.statsBuf
-                           offset:wp * sizeof(GOLStats)
-                          atIndex:3];
-                    [enc dispatchThreadgroups:MakeSize((int)gx, (int)gy, 1)
-                      threadsPerThreadgroup:MakeSize((int)tgW, (int)tgH, 1)];
-                    if (stepIdx < gensToAdvance) {
-                        [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
-                    }
-                }
-                [enc endEncoding];
-                writePlane = (curPlane + (uint32_t)gensToAdvance) %
-                             (uint32_t)PLANE_COUNT;
-                renderPlane = writePlane;
-                self.displayPlane = writePlane;
-                self.completedPlane = curPlane;
-                willStep = YES;
-                [self setCB:cb at:writePlane];
-            }
-        } else if (gensToAdvance > 0) {
+            tgW = 16;
+            tgH = 16;
+            gx = ((NSUInteger)self.gridW + tgW - 1) / tgW;
+            gy = ((NSUInteger)self.gridH + tgH - 1) / tgH;
+            enc = [cb computeCommandEncoder];
+            [enc setComputePipelineState:self.stepPipeline];
             for (stepIdx = 1; stepIdx <= gensToAdvance; stepIdx++) {
                 readPlane = (curPlane + (uint32_t)(stepIdx - 1)) %
                             (uint32_t)PLANE_COUNT;
                 wp = (curPlane + (uint32_t)stepIdx) % (uint32_t)PLANE_COUNT;
-                cur = [self planePointer:readPlane];
-                write = [self planePointer:wp];
-                if (cur != nil && write != nil) {
-                    gol_step_cpu(cur, write, self.gridW, self.gridH, r);
+                [enc setBuffer:self.gridBuf
+                       offset:(NSUInteger)readPlane * self.planeBytes
+                      atIndex:0];
+                [enc setBuffer:self.gridBuf
+                       offset:(NSUInteger)wp * self.planeBytes
+                      atIndex:1];
+                [enc setBuffer:self.uniformsBuf offset:0 atIndex:2];
+                [enc setBuffer:self.statsBuf
+                       offset:wp * sizeof(GOLStats)
+                      atIndex:3];
+                [enc dispatchThreadgroups:MakeSize((int)gx, (int)gy, 1)
+                  threadsPerThreadgroup:MakeSize((int)tgW, (int)tgH, 1)];
+                if (stepIdx < gensToAdvance) {
+                    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
                 }
             }
+            [enc endEncoding];
             writePlane = (curPlane + (uint32_t)gensToAdvance) %
                          (uint32_t)PLANE_COUNT;
             renderPlane = writePlane;
             self.displayPlane = writePlane;
-            self.completedPlane = writePlane;
+            self.completedPlane = curPlane;
             willStep = YES;
-            cells = [self planePointer:writePlane];
-            alive = 0;
-            maxAge = 0;
-            if (cells != nil) {
-                gol_count_alive(cells, self.gridW, self.gridH, &alive, &maxAge);
-            }
-            [self setPopulation:(uint32_t)alive maxAge:(uint32_t)maxAge
-               forGeneration:self.gen + (uint32_t)gensToAdvance];
+            [self setCB:cb at:writePlane];
         }
+    } else if (gensToAdvance > 0) {
+        for (stepIdx = 1; stepIdx <= gensToAdvance; stepIdx++) {
+            readPlane = (curPlane + (uint32_t)(stepIdx - 1)) %
+                        (uint32_t)PLANE_COUNT;
+            wp = (curPlane + (uint32_t)stepIdx) % (uint32_t)PLANE_COUNT;
+            cur = [self planePointer:readPlane];
+            write = [self planePointer:wp];
+            if (cur != nil && write != nil) {
+                gol_step_cpu(cur, write, self.gridW, self.gridH, r);
+            }
+        }
+        writePlane = (curPlane + (uint32_t)gensToAdvance) %
+                     (uint32_t)PLANE_COUNT;
+        renderPlane = writePlane;
+        self.displayPlane = writePlane;
+        self.completedPlane = writePlane;
+        willStep = YES;
+        cells = [self planePointer:writePlane];
+        alive = 0;
+        maxAge = 0;
+        if (cells != nil) {
+            gol_count_alive(cells, self.gridW, self.gridH, &alive, &maxAge);
+        }
+        [self setPopulation:(uint32_t)alive maxAge:(uint32_t)maxAge
+           forGeneration:self.gen + (uint32_t)gensToAdvance];
     }
 
     // Skip idle frames: no step this frame and nothing painted since the last
