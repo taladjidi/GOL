@@ -1,7 +1,7 @@
 CC = clang
-CFLAGS = -O3 -std=gnu11 -Weverything -Wno-poison-system-directories
-OBJCFLAGS = -O3 -std=gnu11 -Weverything -fobjc-arc -fmodules -Wno-poison-system-directories
-METALFLAGS = -Weverything -Wno-c++98-compat -Wno-deprecated
+CFLAGS = -O3 -std=gnu11 -Weverything -Wno-poison-system-directories -arch arm64 -arch x86_64 -mmacosx-version-min=12.0
+OBJCFLAGS = -O3 -std=gnu11 -Weverything -fobjc-arc -fmodules -Wno-poison-system-directories -arch arm64 -arch x86_64 -mmacosx-version-min=12.0
+METALFLAGS = -Weverything -Wno-c++98-compat -Wno-deprecated -mmacosx-version-min=12.0
 FRAMEWORKS = -framework Cocoa -framework Metal -framework MetalKit -framework QuartzCore
 METAL_FRAMEWORKS = -framework Metal
 

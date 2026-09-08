@@ -51,8 +51,9 @@ R-Pentomino simulation:
 
 ## Requirements
 
-- macOS with the Xcode Command Line Tools (`xcode-select --install`), which
-  provides `clang`, the Metal SDK, and `xcrun`.
+- macOS 12.0 or later, with the Xcode Command Line Tools
+  (`xcode-select --install`), which provides `clang`, the Metal SDK, and
+  `xcrun`. The binary is built as a universal (arm64 + x86_64) executable.
 
 ## Build and Run
 
