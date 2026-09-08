@@ -135,7 +135,7 @@ static NSTextField *MakeLabel(NSString *s, NSRect f) {
     NSTextField *l = [NSTextField labelWithString:s];
     l.frame = f;
     l.font = [NSFont systemFontOfSize:13];
-    l.textColor = [NSColor colorWithSRGBRed:0.82 green:0.87 blue:0.92 alpha:1.0];
+    l.textColor = [NSColor labelColor];
     return l;
 }
 
@@ -143,7 +143,7 @@ static NSTextField *MakeLabelSmall(NSString *s, NSRect f) {
     NSTextField *l = [NSTextField labelWithString:s];
     l.frame = f;
     l.font = [NSFont systemFontOfSize:11];
-    l.textColor = [NSColor colorWithSRGBRed:0.65 green:0.70 blue:0.76 alpha:1.0];
+    l.textColor = [NSColor secondaryLabelColor];
     return l;
 }
 
@@ -232,13 +232,13 @@ static NSStackView *HGroup(NSView *a, NSView *b, NSView *c) {
     [super drawRect:dirtyRect];
 
     on = [NSColor colorWithSRGBRed:0.25 green:0.70 blue:0.40 alpha:1.0];
-    off = [NSColor colorWithSRGBRed:0.16 green:0.19 blue:0.24 alpha:1.0];
+    off = [NSColor quaternaryLabelColor];
     attrsOn = @{ NSFontAttributeName: [NSFont systemFontOfSize:9 weight:NSFontWeightSemibold],
-                 NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.05 green:0.10 blue:0.05 alpha:1.0] };
+                  NSForegroundColorAttributeName: [NSColor labelColor] };
     attrsOff = @{ NSFontAttributeName: [NSFont systemFontOfSize:9],
-                  NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.60 green:0.65 blue:0.70 alpha:1.0] };
+                   NSForegroundColorAttributeName: [NSColor secondaryLabelColor] };
     lblAttrs = @{ NSFontAttributeName: [NSFont systemFontOfSize:10 weight:NSFontWeightBold],
-                  NSForegroundColorAttributeName: [NSColor whiteColor] };
+                   NSForegroundColorAttributeName: [NSColor labelColor] };
 
     for (row = 0; row < 2; row++) {
         NSRect cell0;
@@ -328,7 +328,7 @@ static const int kSparkCapacity = 120;
 - (instancetype)initWithFrame:(NSRect)frame {
     if ((self = [super initWithFrame:frame])) {
         self.wantsLayer = YES;
-        self.layer.backgroundColor = [NSColor colorWithSRGBRed:0.05 green:0.06 blue:0.09 alpha:1.0].CGColor;
+        self.layer.backgroundColor = [NSColor colorWithWhite:0 alpha:0.25].CGColor;
         self.values = (int *)calloc((size_t)kSparkCapacity, sizeof(int));
         self.head = 0;
         self.count = 0;
@@ -387,7 +387,7 @@ static const int kSparkCapacity = 120;
             maxV = self.values[idx];
         }
     }
-    lineC = [NSColor colorWithSRGBRed:0.45 green:0.85 blue:1.00 alpha:1.0];
+    lineC = [NSColor controlAccentColor];
 
     if (self.count == 1) {
         // A single sample (e.g. right after loading a pattern while the sim is
@@ -423,7 +423,7 @@ static const int kSparkCapacity = 120;
     [area lineToPoint:NSMakePoint(b.size.width, b.size.height)];
     [area closePath];
 
-    fillC = [NSColor colorWithSRGBRed:0.20 green:0.65 blue:0.85 alpha:0.30];
+    fillC = [[NSColor controlAccentColor] colorWithAlphaComponent:0.3];
     [fillC setFill];
     [area fill];
     line.lineWidth = 1.5;
@@ -2047,6 +2047,7 @@ static int paintCount;
                                                                             NSWindowStyleMaskResizable)
                                                 backing:NSBackingStoreBuffered
                                                   defer:NO];
+    self.window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
     self.window.releasedWhenClosed = NO;
     [self.window setTitle:@"Game of Life"];
     [self.window setContentSize:content.size];
@@ -2071,7 +2072,6 @@ static int paintCount;
     bar.spacing = 6.0;
     bar.translatesAutoresizingMaskIntoConstraints = NO;
     bar.wantsLayer = YES;
-    bar.layer.backgroundColor = [NSColor colorWithSRGBRed:0.07 green:0.08 blue:0.11 alpha:1.0].CGColor;
     [contentView addSubview:bar];
 
     // --- Simulation row: transport, then preset and the sliders. ---
