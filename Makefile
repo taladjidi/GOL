@@ -80,6 +80,18 @@ run: app
 run-bare: all
 	./bin/gol
 
+# 3.3: Developer ID signing + notarization. Requires SIGN_ID (a "Developer ID
+# Application" identity) and NOTARY_PROFILE (a notarytool keychain profile).
+notarize: app
+	@if [ -z "$(SIGN_ID)" ] || [ -z "$(NOTARY_PROFILE)" ]; then \
+		echo "set SIGN_ID and NOTARY_PROFILE"; \
+		exit 1; \
+	fi
+	codesign --force --options runtime --timestamp -s "$(SIGN_ID)" bin/GOL.app
+	ditto -c -k --keepParent bin/GOL.app build/GOL.zip
+	xcrun notarytool submit build/GOL.zip --keychain-profile "$(NOTARY_PROFILE)" --wait
+	xcrun stapler staple bin/GOL.app
+
 test: build/gol_test build/ref_test build/metal_test bin/default.metallib
 	./build/gol_test
 	./build/ref_test
@@ -88,4 +100,4 @@ test: build/gol_test build/ref_test build/metal_test bin/default.metallib
 clean:
 	rm -rf bin build
 
-.PHONY: all app run run-bare clean test
+.PHONY: all app run run-bare notarize clean test
