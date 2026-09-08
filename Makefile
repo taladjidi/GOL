@@ -46,14 +46,29 @@ bin/default.metallib: shaders.metal | bin build
 	xcrun -sdk macosx metal $(METALFLAGS) -c shaders.metal -o build/shaders.air
 	xcrun -sdk macosx metallib build/shaders.air -o $@
 
-# Assemble the app bundle. The icns is copied only if 3.2 has generated it, so
-# the bundle builds (icon-less) before the icon exists.
-bin/GOL.app: bin/gol bin/default.metallib packaging/Info.plist | bin
+# 3.2: build the app icon from the committed PNG. sips resizes to each iconset
+# size, iconutil packs them into the .icns (a build artifact in gitignored bin/).
+bin/GOL.icns: packaging/icon.png | bin build
+	rm -rf build/icon.iconset
+	mkdir -p build/icon.iconset
+	sips -z 16 16     packaging/icon.png --out build/icon.iconset/icon_16x16.png
+	sips -z 32 32     packaging/icon.png --out build/icon.iconset/icon_16x16@2x.png
+	sips -z 32 32     packaging/icon.png --out build/icon.iconset/icon_32x32.png
+	sips -z 64 64     packaging/icon.png --out build/icon.iconset/icon_32x32@2x.png
+	sips -z 128 128   packaging/icon.png --out build/icon.iconset/icon_128x128.png
+	sips -z 256 256   packaging/icon.png --out build/icon.iconset/icon_128x128@2x.png
+	sips -z 256 256   packaging/icon.png --out build/icon.iconset/icon_256x256.png
+	sips -z 512 512   packaging/icon.png --out build/icon.iconset/icon_256x256@2x.png
+	sips -z 1024 1024 packaging/icon.png --out build/icon.iconset/icon_512x512@2x.png
+	iconutil -c icns build/icon.iconset -o $@
+
+# Assemble the app bundle (icon included).
+bin/GOL.app: bin/gol bin/default.metallib packaging/Info.plist bin/GOL.icns | bin
 	rm -rf $@
 	mkdir -p $@/Contents/MacOS $@/Contents/Resources
 	cp bin/gol $@/Contents/MacOS/
 	cp bin/default.metallib $@/Contents/Resources/
-	[ -f bin/GOL.icns ] && cp bin/GOL.icns $@/Contents/Resources/ || true
+	cp bin/GOL.icns $@/Contents/Resources/
 	sed 's/$$(VERSION)/$(VERSION)/g' packaging/Info.plist > $@/Contents/Info.plist
 	codesign -s - --force --deep $@
 

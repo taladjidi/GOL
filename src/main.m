@@ -2,6 +2,8 @@
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
 #import <QuartzCore/QuartzCore.h>
+#import <CoreGraphics/CoreGraphics.h>
+#import <ImageIO/ImageIO.h>
 #include "gol.h"
 #include <math.h>
 #include <string.h>
@@ -520,6 +522,10 @@ static int paintCount;
 @property (nonatomic, strong) NSTextField *hoverLabel;
 @property (nonatomic, strong) NSTextField *hintLabel;
 @property (nonatomic, strong) id keyMonitor;
+@property (nonatomic, copy) NSString *screenshotPath;
+@property (nonatomic, assign) int screenshotGen;
+@property (nonatomic, assign) int screenshotSize;
+@property (nonatomic, copy) NSString *launchPreset;
 
 - (BOOL)setupMetal;
 - (void)setupUI;
@@ -568,6 +574,11 @@ static int paintCount;
 - (id<MTLCommandBuffer>)cbAt:(uint32_t)plane;
 - (void)setCB:(id<MTLCommandBuffer>)cb at:(uint32_t)plane;
 - (void)clearCBRing;
+- (void)runScreenshot;
+- (void)advanceGenerations:(int)n;
+- (void)renderCellPlane:(uint32_t)plane cb:(id<MTLCommandBuffer>)cb;
+- (void)renderFrameToTexture:(id<MTLTexture>)target cb:(id<MTLCommandBuffer>)cb;
+- (BOOL)writePNGFromTexture:(id<MTLTexture>)tex path:(NSString *)path;
 @end
 
 @interface GOLView : MTKView
@@ -758,6 +769,10 @@ static int paintCount;
 @synthesize hoverLabel = _hoverLabel;
 @synthesize hintLabel = _hintLabel;
 @synthesize keyMonitor = _keyMonitor;
+@synthesize screenshotPath = _screenshotPath;
+@synthesize screenshotGen = _screenshotGen;
+@synthesize screenshotSize = _screenshotSize;
+@synthesize launchPreset = _launchPreset;
 
 - (void)applyLaunchConfig {
     NSArray<NSString *> *args;
@@ -770,6 +785,11 @@ static int paintCount;
     int densitySet = 0;
     int zoomSet = 0;
     int runSet = 0;
+    NSString *screenshot = nil;
+    int gen = 300;
+    int size = 1024;
+    int genSet = 0;
+    int sizeSet = 0;
     const char *env;
     double val;
     NSUInteger i;
@@ -784,6 +804,9 @@ static int paintCount;
             else if ([a caseInsensitiveCompare:@"--density"] == NSOrderedSame) { density = atof(n.UTF8String); densitySet = 1; i++; }
             else if ([a caseInsensitiveCompare:@"--zoom"] == NSOrderedSame) { zoom = atof(n.UTF8String); zoomSet = 1; i++; }
             else if ([a caseInsensitiveCompare:@"--run"] == NSOrderedSame) { run = atoi(n.UTF8String); runSet = 1; i++; }
+            else if ([a caseInsensitiveCompare:@"--screenshot"] == NSOrderedSame) { screenshot = n; i++; }
+            else if ([a caseInsensitiveCompare:@"--gen"] == NSOrderedSame) { gen = atoi(n.UTF8String); genSet = 1; i++; }
+            else if ([a caseInsensitiveCompare:@"--size"] == NSOrderedSame) { size = atoi(n.UTF8String); sizeSet = 1; i++; }
         }
     }
     if (mode == nil && (env = getenv("GOL_MODE")) != NULL) mode = [NSString stringWithUTF8String:env];
@@ -792,6 +815,9 @@ static int paintCount;
     if (!densitySet && (env = getenv("GOL_DENSITY")) != NULL) { density = atof(env); densitySet = 1; }
     if (!zoomSet && (env = getenv("GOL_ZOOM")) != NULL) { zoom = atof(env); zoomSet = 1; }
     if (!runSet && (env = getenv("GOL_RUN")) != NULL) { run = atoi(env); runSet = 1; }
+    if (screenshot == nil && (env = getenv("GOL_SCREENSHOT")) != NULL) screenshot = [NSString stringWithUTF8String:env];
+    if (!genSet && (env = getenv("GOL_GEN")) != NULL) { gen = atoi(env); genSet = 1; }
+    if (!sizeSet && (env = getenv("GOL_SIZE")) != NULL) { size = atoi(env); sizeSet = 1; }
     if (densitySet && self.densitySlider != nil) {
         val = density;
         if (val < 0.0) val = 0.0;
@@ -812,6 +838,12 @@ static int paintCount;
         else if ([p isEqualToString:@"plasma"]) self.palette = PALETTE_PLASMA;
         else if ([p isEqualToString:@"turbo"]) self.palette = PALETTE_TURBO;
         else self.palette = PALETTE_VIRIDIS;
+    }
+    self.launchPreset = preset;
+    if (screenshot != nil && screenshot.length > 0) {
+        self.screenshotPath = screenshot;
+        self.screenshotGen = (gen > 0) ? gen : 300;
+        self.screenshotSize = (size > 0) ? size : 1024;
     }
     if (preset != nil && preset.length > 0) {
         [self applyPreset:[preset UTF8String]];
@@ -862,6 +894,11 @@ static int paintCount;
     }
     [self setupUI];
     [self applyLaunchConfig];
+
+    if (self.screenshotPath != nil) {
+        [self runScreenshot];
+        return;
+    }
 
     self.statsTimer = [NSTimer timerWithTimeInterval:1.0 / 15.0
                                               target:self
@@ -2317,6 +2354,425 @@ static int paintCount;
     self.cb0 = nil;
     self.cb1 = nil;
     self.cb2 = nil;
+}
+
+- (void)renderCellPlane:(uint32_t)plane cb:(id<MTLCommandBuffer>)cb {
+    MTLRenderPassDescriptor *rp;
+    id<MTLRenderCommandEncoder> enc;
+    MTLViewport vp;
+    Uniforms *u;
+
+    if (cb == nil || self.cellTex == nil || self.renderPipeline == nil ||
+        self.gridBuf == nil || self.uniformsBuf == nil ||
+        self.cellTex.width == 0 || self.cellTex.height == 0) {
+        return;
+    }
+    u = (Uniforms *)[self.uniformsBuf contents];
+    u->curOffset = plane * (uint32_t)self.planeCells;
+    rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = self.cellTex;
+    rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    enc = [cb renderCommandEncoderWithDescriptor:rp];
+    if (enc == nil) {
+        return;
+    }
+    [enc setRenderPipelineState:self.renderPipeline];
+    vp.originX = 0.0;
+    vp.originY = 0.0;
+    vp.width = (double)self.cellTex.width;
+    vp.height = (double)self.cellTex.height;
+    vp.znear = 0.0;
+    vp.zfar = 1.0;
+    [enc setViewport:vp];
+    [enc setFragmentBuffer:self.gridBuf offset:0 atIndex:0];
+    [enc setFragmentBuffer:self.uniformsBuf offset:0 atIndex:1];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+    [enc endEncoding];
+}
+
+- (void)renderFrameToTexture:(id<MTLTexture>)target cb:(id<MTLCommandBuffer>)cb {
+    MTLRenderPassDescriptor *rp;
+    id<MTLRenderCommandEncoder> enc;
+    MTLViewport vp;
+
+    if (cb == nil || target == nil || self.scalePipeline == nil ||
+        self.uniformsBuf == nil) {
+        return;
+    }
+    rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = target;
+    rp.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    enc = [cb renderCommandEncoderWithDescriptor:rp];
+    if (enc == nil) {
+        return;
+    }
+    [enc setRenderPipelineState:self.scalePipeline];
+    vp.originX = 0.0;
+    vp.originY = 0.0;
+    vp.width = (double)target.width;
+    vp.height = (double)target.height;
+    vp.znear = 0.0;
+    vp.zfar = 1.0;
+    [enc setViewport:vp];
+    [enc setFragmentBuffer:self.uniformsBuf offset:0 atIndex:0];
+    if (self.cellTex != nil) {
+        [enc setFragmentTexture:self.cellTex atIndex:0];
+    }
+    if (self.trailTex != nil) {
+        [enc setFragmentTexture:self.trailTex atIndex:1];
+    }
+    [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+    [enc endEncoding];
+}
+
+- (BOOL)writePNGFromTexture:(id<MTLTexture>)tex path:(NSString *)path {
+    NSUInteger w;
+    NSUInteger h;
+    NSUInteger rowBytes;
+    NSUInteger totalBytes;
+    void *bytes;
+    CGDataProviderRef provider;
+    CGColorSpaceRef cs;
+    CGImageRef img;
+    NSURL *url;
+    CFURLRef cfurl;
+    CGImageDestinationRef dest;
+    CFIndex len;
+    BOOL ok;
+
+    if (tex == nil || path == nil || tex.width == 0 || tex.height == 0) {
+        return NO;
+    }
+    w = tex.width;
+    h = tex.height;
+    rowBytes = w * 4;
+    totalBytes = rowBytes * h;
+    bytes = malloc(totalBytes);
+    if (bytes == NULL) {
+        return NO;
+    }
+    [tex getBytes:bytes
+       bytesPerRow:rowBytes
+        fromRegion:MTLRegionMake2D(0, 0, w, h)
+        mipmapLevel:0];
+
+    // The texture is BGRA8Unorm (memory byte order B,G,R,A). Describe it to
+    // Core Graphics as little-endian 32-bit with the alpha byte first: a
+    // big-endian [A,R,G,B] word reversed by 32Little yields [B,G,R,A], matching
+    // the buffer. The render is fully opaque, so premultiplied == straight.
+    provider = CGDataProviderCreateWithData(NULL, bytes, totalBytes, NULL);
+    if (provider == NULL) {
+        free(bytes);
+        return NO;
+    }
+    cs = CGColorSpaceCreateDeviceRGB();
+    img = CGImageCreate(w, h, 8, 32, rowBytes, cs,
+                        (CGBitmapInfo)((CGBitmapInfo)kCGImageAlphaPremultipliedFirst |
+                                       (CGBitmapInfo)kCGBitmapByteOrder32Little),
+                        provider, NULL, false, kCGRenderingIntentDefault);
+    CGColorSpaceRelease(cs);
+    if (img == NULL) {
+        CGDataProviderRelease(provider);
+        free(bytes);
+        return NO;
+    }
+
+    url = [NSURL fileURLWithPath:path];
+    len = (CFIndex)strlen(url.fileSystemRepresentation);
+    cfurl = CFURLCreateFromFileSystemRepresentation(kCFAllocatorDefault,
+                                                    (const UInt8 *)url.fileSystemRepresentation,
+                                                    len, false);
+    if (cfurl == NULL) {
+        CGImageRelease(img);
+        CGDataProviderRelease(provider);
+        free(bytes);
+        return NO;
+    }
+    dest = CGImageDestinationCreateWithURL(cfurl, CFSTR("public.png"), 1, NULL);
+    CFRelease(cfurl);
+    if (dest == NULL) {
+        CGImageRelease(img);
+        CGDataProviderRelease(provider);
+        free(bytes);
+        return NO;
+    }
+    CGImageDestinationAddImage(dest, img, NULL);
+    ok = CGImageDestinationFinalize(dest);
+    CFRelease(dest);
+    CGImageRelease(img);
+    CGDataProviderRelease(provider);
+    free(bytes);
+    return ok;
+}
+
+- (void)advanceGenerations:(int)n {
+    GOLRules r;
+    Uniforms *u;
+    uint32_t curPlane;
+    uint32_t readPlane;
+    uint32_t wp;
+    int i;
+    int stepIdx;
+    uint16_t *cur;
+    uint16_t *write;
+    id<MTLCommandBuffer> cb;
+    id<MTLComputeCommandEncoder> enc;
+    NSUInteger tgW;
+    NSUInteger tgH;
+    NSUInteger gx;
+    NSUInteger gy;
+
+    if (n <= 0) {
+        return;
+    }
+    r = self.rules;
+    curPlane = (uint32_t)(self.frameIndex % (uint32_t)PLANE_COUNT);
+    u = (Uniforms *)[self.uniformsBuf contents];
+    u->gridW = (uint32_t)self.gridW;
+    u->gridH = (uint32_t)self.gridH;
+    u->pad = 0;
+    u->birth = r.birth;
+    u->survival = r.survival;
+
+    if (self.displayMode != DISPLAY_TRAILS) {
+        for (i = 1; i <= n; i++) {
+            readPlane = (curPlane + (uint32_t)(i - 1)) % (uint32_t)PLANE_COUNT;
+            wp = (curPlane + (uint32_t)i) % (uint32_t)PLANE_COUNT;
+            cur = [self planePointer:readPlane];
+            write = [self planePointer:wp];
+            if (cur != nil && write != nil) {
+                gol_step_cpu(cur, write, self.gridW, self.gridH, r);
+            }
+        }
+        self.frameIndex = self.frameIndex + (uint64_t)n;
+        self.displayPlane = (curPlane + (uint32_t)n) % (uint32_t)PLANE_COUNT;
+        self.gen = self.gen + (uint32_t)n;
+        return;
+    }
+
+    // Trails: the intensity is a visual accumulation, so each generation must
+    // step the grid, render it into cellTex, and fold that into trailTex.
+    [self clearTrailNow];
+    cb = [self.queue commandBuffer];
+    if (cb == nil) {
+        for (i = 1; i <= n; i++) {
+            readPlane = (curPlane + (uint32_t)(i - 1)) % (uint32_t)PLANE_COUNT;
+            wp = (curPlane + (uint32_t)i) % (uint32_t)PLANE_COUNT;
+            cur = [self planePointer:readPlane];
+            write = [self planePointer:wp];
+            if (cur != nil && write != nil) {
+                gol_step_cpu(cur, write, self.gridW, self.gridH, r);
+            }
+        }
+        self.frameIndex = self.frameIndex + (uint64_t)n;
+        self.displayPlane = (curPlane + (uint32_t)n) % (uint32_t)PLANE_COUNT;
+        self.gen = self.gen + (uint32_t)n;
+        return;
+    }
+
+    tgW = 16;
+    tgH = 16;
+    gx = ((NSUInteger)self.gridW + tgW - 1) / tgW;
+    gy = ((NSUInteger)self.gridH + tgH - 1) / tgH;
+    for (stepIdx = 1; stepIdx <= n; stepIdx++) {
+        readPlane = (curPlane + (uint32_t)(stepIdx - 1)) % (uint32_t)PLANE_COUNT;
+        wp = (curPlane + (uint32_t)stepIdx) % (uint32_t)PLANE_COUNT;
+
+        if (self.stepPipeline != nil) {
+            enc = [cb computeCommandEncoder];
+            if (enc != nil) {
+                [enc setComputePipelineState:self.stepPipeline];
+                [enc setBuffer:self.gridBuf offset:(NSUInteger)readPlane * self.planeBytes atIndex:0];
+                [enc setBuffer:self.gridBuf offset:(NSUInteger)wp * self.planeBytes atIndex:1];
+                [enc setBuffer:self.uniformsBuf offset:0 atIndex:2];
+                [enc setBuffer:self.statsBuf offset:(NSUInteger)wp * sizeof(GOLStats) atIndex:3];
+                [enc dispatchThreadgroups:MakeSize((int)gx, (int)gy, 1)
+                  threadsPerThreadgroup:MakeSize((int)tgW, (int)tgH, 1)];
+                [enc endEncoding];
+            }
+        } else {
+            cur = [self planePointer:readPlane];
+            write = [self planePointer:wp];
+            if (cur != nil && write != nil) {
+                gol_step_cpu(cur, write, self.gridW, self.gridH, r);
+            }
+        }
+
+        [self renderCellPlane:wp cb:cb];
+
+        if (self.trailStepPipeline != nil && self.trailTex != nil &&
+            self.trailTex.width > 0 && self.trailTex.height > 0) {
+            tgW = 16;
+            tgH = 16;
+            gx = (self.trailTex.width + tgW - 1) / tgW;
+            gy = (self.trailTex.height + tgH - 1) / tgH;
+            enc = [cb computeCommandEncoder];
+            if (enc != nil) {
+                [enc setComputePipelineState:self.trailStepPipeline];
+                [enc setTexture:self.cellTex atIndex:0];
+                [enc setTexture:self.trailTex atIndex:1];
+                [enc setTexture:self.trailTex atIndex:2];
+                [enc dispatchThreadgroups:MakeSize((int)gx, (int)gy, 1)
+                  threadsPerThreadgroup:MakeSize((int)tgW, (int)tgH, 1)];
+                [enc endEncoding];
+            }
+        }
+    }
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.error != nil) {
+        NSLog(@"screenshot: trail advance error: %@", cb.error);
+    }
+    self.frameIndex = self.frameIndex + (uint64_t)n;
+    self.displayPlane = (curPlane + (uint32_t)n) % (uint32_t)PLANE_COUNT;
+    self.gen = self.gen + (uint32_t)n;
+}
+
+- (void)runScreenshot {
+    int S;
+    int G;
+    GOLRules r;
+    Uniforms *u;
+    id<MTLCommandBuffer> cb;
+    MTLTextureDescriptor *d;
+    id<MTLTexture> outTex;
+    uint16_t *cells;
+    int minCol, maxCol, minRow, maxRow;
+    int x, y;
+    int bboxW, bboxH, pad;
+    double centerCol, centerRow, regionW, regionH, maxDim, fit;
+
+    if (self.device == nil || self.queue == nil ||
+        self.renderPipeline == nil || self.scalePipeline == nil ||
+        self.uniformsBuf == nil || self.gridBuf == nil) {
+        NSLog(@"screenshot: Metal not ready");
+        [NSApp terminate:nil];
+        return;
+    }
+
+    S = self.screenshotSize;
+    if (S < 16) {
+        S = 16;
+    }
+    if (S > MAX_TEXTURE_SIZE) {
+        S = MAX_TEXTURE_SIZE;
+    }
+
+    // Render the grid at a quarter of the output size so each cell spans four
+    // pixels; fs_scale then uses its point-read path for clean rounded cells.
+    G = S / 4;
+    if (G < 8) {
+        G = 8;
+    }
+    if (G > self.maxGridW) {
+        G = self.maxGridW;
+    }
+    if (G > self.maxGridH) {
+        G = self.maxGridH;
+    }
+    while ((long long)G * (long long)G > (long long)self.planeCells && G > 8) {
+        G--;
+    }
+
+    self.gridW = G;
+    self.gridH = G;
+    [self rebuildCellTexture];
+
+    if (self.launchPreset != nil && self.launchPreset.length > 0) {
+        [self applyPreset:[self.launchPreset UTF8String]];
+    } else {
+        [self randomize];
+    }
+
+    [self advanceGenerations:self.screenshotGen];
+
+    r = self.rules;
+    u = (Uniforms *)[self.uniformsBuf contents];
+    u->gridW = (uint32_t)self.gridW;
+    u->gridH = (uint32_t)self.gridH;
+    u->pad = 0;
+    u->birth = r.birth;
+    u->survival = r.survival;
+    u->viewWidth = (float)S;
+    u->viewHeight = (float)S;
+    u->displayMode = self.displayMode;
+    u->palette = self.palette;
+    u->glow = self.glowOn ? 1.0f : 0.0f;
+
+    // The pattern usually occupies a small central region of the grid, so map
+    // the whole grid and it would render tiny. Instead, auto-fit the view to
+    // the live-cell bounding box (with a margin) so the pattern fills the
+    // square canvas, centered and aspect-preserving.
+    minCol = INT_MAX; maxCol = -1; minRow = INT_MAX; maxRow = -1;
+    cells = [self planePointer:self.displayPlane];
+    if (cells != nil) {
+        for (y = 0; y < (int)self.gridH; y++) {
+            for (x = 0; x < (int)self.gridW; x++) {
+                if ((cells[(size_t)y * (size_t)self.gridW + (size_t)x] & 1u) != 0u) {
+                    if (x < minCol) minCol = x;
+                    if (x > maxCol) maxCol = x;
+                    if (y < minRow) minRow = y;
+                    if (y > maxRow) maxRow = y;
+                }
+            }
+        }
+    }
+    if (maxCol >= minCol && maxRow >= minRow) {
+        bboxW = maxCol - minCol + 1;
+        bboxH = maxRow - minRow + 1;
+        pad = (int)(0.18 * (double)(bboxW > bboxH ? bboxW : bboxH)) + 4;
+        centerCol = ((double)minCol + (double)maxCol + 1.0) * 0.5;
+        centerRow = ((double)minRow + (double)maxRow + 1.0) * 0.5;
+        regionW = (double)bboxW + 2.0 * (double)pad;
+        regionH = (double)bboxH + 2.0 * (double)pad;
+        maxDim = regionW > regionH ? regionW : regionH;
+        fit = maxDim / (double)S;
+        u->viewScaleX = (float)fit;
+        u->viewScaleY = (float)fit;
+        u->viewOffsetX = (float)((double)S * 0.5 - centerCol / fit);
+        u->viewOffsetY = (float)((double)S * 0.5 - centerRow / fit);
+    } else {
+        u->viewScaleX = (float)self.gridW / (float)S;
+        u->viewScaleY = (float)self.gridH / (float)S;
+        u->viewOffsetX = 0.0f;
+        u->viewOffsetY = 0.0f;
+    }
+
+    d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                           width:(NSUInteger)S
+                                                          height:(NSUInteger)S
+                                                      mipmapped:NO];
+    d.usage = (MTLTextureUsage)(MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead);
+    d.storageMode = MTLStorageModeShared;
+    outTex = [self.device newTextureWithDescriptor:d];
+    if (outTex == nil) {
+        NSLog(@"screenshot: failed to create output texture");
+        [NSApp terminate:nil];
+        return;
+    }
+
+    cb = [self.queue commandBuffer];
+    if (cb == nil) {
+        NSLog(@"screenshot: no command buffer");
+        [NSApp terminate:nil];
+        return;
+    }
+    [self renderCellPlane:self.displayPlane cb:cb];
+    [self renderFrameToTexture:outTex cb:cb];
+    [cb commit];
+    [cb waitUntilCompleted];
+    if (cb.error != nil) {
+        NSLog(@"screenshot: render error: %@", cb.error);
+    }
+
+    if (![self writePNGFromTexture:outTex path:self.screenshotPath]) {
+        NSLog(@"screenshot: PNG write to %@ failed", self.screenshotPath);
+    } else {
+        NSLog(@"screenshot: wrote %dx%d PNG to %@", S, S, self.screenshotPath);
+    }
+    [NSApp terminate:nil];
 }
 
 - (void)tick {
