@@ -108,7 +108,9 @@ Example:
 | --- | --- |
 | Left drag | Paint with the active tool (Add or Erase) |
 | Right drag | Paint with the opposite of the active tool |
-| Scroll wheel | Zoom in/out at the cursor |
+| Two-finger scroll | Pan the camera |
+| Pinch | Zoom in/out at the cursor |
+| Cmd + scroll | Zoom in/out at the cursor |
 | Option + left drag, or middle drag | Pan the camera |
 | Hover | Shows cell coordinates and age in the readout panel right of the canvas |
 

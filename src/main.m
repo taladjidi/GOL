@@ -596,8 +596,10 @@ static int paintCount;
 - (void)beginPanAtEvent:(NSEvent *)e;
 - (void)panWithEvent:(NSEvent *)e;
 - (void)endPan;
-- (void)zoomAtEvent:(NSEvent *)e;
-- (void)zoomBy:(id)sender;
+ - (void)zoomAtEvent:(NSEvent *)e;
+ - (void)zoomByFactor:(double)factor atPoint:(NSPoint)pt;
+ - (void)zoomBy:(id)sender;
+ - (void)scrollPanWithEvent:(NSEvent *)e;
 - (void)hoverAtEvent:(NSEvent *)e;
 - (void)hoverExited;
 - (void)updateHoverAtPoint:(NSPoint)pt;
@@ -719,9 +721,24 @@ static int paintCount;
 
 - (void)scrollWheel:(NSEvent *)e {
     App *owner = self.owner;
-    if (owner != nil) {
-        [owner zoomAtEvent:e];
+    if (owner == nil) {
+        return;
     }
+    if (([e modifierFlags] & NSEventModifierFlagCommand) != 0) {
+        [owner zoomAtEvent:e];
+    } else {
+        [owner scrollPanWithEvent:e];
+    }
+}
+
+- (void)magnifyWithEvent:(NSEvent *)e {
+    App *owner = self.owner;
+    NSPoint pt;
+    if (owner == nil) {
+        return;
+    }
+    pt = [owner topPointForEvent:e];
+    [owner zoomByFactor:1.0 + e.magnification atPoint:pt];
 }
 
 - (void)mouseMoved:(NSEvent *)e {
@@ -1810,21 +1827,29 @@ static int paintCount;
 
 - (void)zoomAtEvent:(NSEvent *)e {
     NSPoint pt;
-    double gx;
-    double gy;
     double dy;
     double factor;
-    double newCellPx;
 
     if (self.mtkView == nil || self.cellPx < 0.01) {
         return;
     }
     pt = [self topPointForEvent:e];
-    gx = (pt.x - self.viewOffsetX) / self.cellPx;
-    gy = (pt.y - self.viewOffsetY) / self.cellPx;
     dy = e.scrollingDeltaY * (e.hasPreciseScrollingDeltas ? 0.02 : 0.1);
     factor = exp2(dy);
     factor = ClampDouble(factor, 0.5, 2.0);
+    [self zoomByFactor:factor atPoint:pt];
+}
+
+- (void)zoomByFactor:(double)factor atPoint:(NSPoint)pt {
+    double gx;
+    double gy;
+    double newCellPx;
+
+    if (self.mtkView == nil || self.cellPx < 0.01) {
+        return;
+    }
+    gx = (pt.x - self.viewOffsetX) / self.cellPx;
+    gy = (pt.y - self.viewOffsetY) / self.cellPx;
     newCellPx = (double)self.cellPx * factor;
     newCellPx = ClampDouble(newCellPx, (double)MIN_CELL_PX, (double)MAX_CELL_PX);
     self.cellPx = (CGFloat)newCellPx;
@@ -1832,6 +1857,17 @@ static int paintCount;
     self.viewOffsetY = pt.y - (CGFloat)gy * self.cellPx;
     [self updateZoomLabel];
     [self requestGridResize];
+}
+
+- (void)scrollPanWithEvent:(NSEvent *)e {
+    double k;
+    // Precise (trackpad) deltas are in points; line-based wheel deltas are
+    // scaled up so a wheel mouse pans at a usable speed. The view is not
+    // flipped, so Y is negated to match topPointForEvent: coordinates.
+    k = e.hasPreciseScrollingDeltas ? 1.0 : 8.0;
+    self.viewOffsetX += (CGFloat)(e.scrollingDeltaX * k);
+    self.viewOffsetY -= (CGFloat)(e.scrollingDeltaY * k);
+    [self markDirty];
 }
 
 - (void)zoomBy:(id)sender {
