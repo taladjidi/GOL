@@ -21,6 +21,10 @@ struct Uniforms {
     uint displayMode;
     uint palette;
     float glow;
+    float cursorX;
+    float cursorY;
+    float brushR;
+    float pad2;
 };
 
 struct VSOut {
@@ -160,6 +164,21 @@ constexpr sampler s_linear(filter::linear, address::clamp_to_edge);
     return float4(col, 1.0f);
 }
 
+// Brush cursor preview ring: a soft circle of radius u.brushR (in cells)
+// centered on the cursor, one pixel wide at any zoom. Returns the blend
+// amount toward the ring color; 0 when the cursor is hidden.
+static float BrushRing(float2 gridF, float2 scale, constant Uniforms &u) {
+    float s;
+    float d;
+
+    if (u.cursorX < -1e8f) {
+        return 0.0f;
+    }
+    s = max(min(scale.x, scale.y), 1e-6f);
+    d = abs(length(gridF - float2(u.cursorX, u.cursorY)) - u.brushR) / s;
+    return (1.0f - smoothstep(0.0f, 1.0f, d)) * 0.6f;
+}
+
 // Scales the small cell texture to the drawable and draws cell gaps.
 [[fragment]] float4 fs_scale(VSOut in [[stage_in]],
                               texture2d<float> tex [[texture(0)]],
@@ -172,7 +191,7 @@ constexpr sampler s_linear(filter::linear, address::clamp_to_edge);
     float2 gridF = (viewPos - float2(u.viewOffsetX, u.viewOffsetY)) * scale;
     if (gridF.x < 0.0f || gridF.x >= static_cast<float>(u.gridW) ||
         gridF.y < 0.0f || gridF.y >= static_cast<float>(u.gridH)) {
-        return bg;
+        return float4(mix(bg.rgb, float3(0.9f), BrushRing(gridF, scale, u)), 1.0f);
     }
     float2 f = fract(gridF);
     bool subpixel = (u.viewScaleX > 1.0f) || (u.viewScaleY > 1.0f);
@@ -193,6 +212,7 @@ constexpr sampler s_linear(filter::linear, address::clamp_to_edge);
         }
         float3 col = bg.rgb * (1.0f - sample.a) + sample.rgb;
         col += sample.rgb * u.glow * 0.3f;
+        col = mix(col, float3(0.9f), BrushRing(gridF, scale, u));
         return float4(col, 1.0f);
     }
     if (u.displayMode == kDisplayTrails) {
@@ -212,10 +232,11 @@ constexpr sampler s_linear(filter::linear, address::clamp_to_edge);
     float glowA = sample.a * (1.0f - smoothstep(0.0f, 0.55f, d)) * u.glow;
     float a = clamp(bodyA + glowA, 0.0f, 1.0f);
     if (a < 0.004f) {
-        return bg;
+        return float4(mix(bg.rgb, float3(0.9f), BrushRing(gridF, scale, u)), 1.0f);
     }
     float3 col = bg.rgb * (1.0f - a) + sample.rgb * a;
     col += sample.rgb * glowA * 0.3f;
+    col = mix(col, float3(0.9f), BrushRing(gridF, scale, u));
     return float4(col, 1.0f);
 }
 

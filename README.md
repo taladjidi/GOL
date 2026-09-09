@@ -112,7 +112,7 @@ Example:
 | Pinch | Zoom in/out at the cursor |
 | Cmd + scroll | Zoom in/out at the cursor |
 | Option + left drag, or middle drag | Pan the camera |
-| Hover | Shows cell coordinates and age in the readout panel right of the canvas |
+| Hover | Shows cell coordinates and age in the readout panel right of the canvas, and a ring on the canvas previewing the brush |
 
 ### Keyboard
 

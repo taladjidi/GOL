@@ -33,6 +33,19 @@ would help.
 - **Deferred:** the live in-app 600 gen/s compute-vs-presentation split under
   Instruments. The display session was asleep/off-screen during this work, so the
   headless number above stands in for the decision gate.
+- **Headless offscreen render no-op (environment quirk, unresolved):** in a bare
+  CLI process on this machine, offscreen *render-pass* encodes silently no-op —
+  the command buffer completes (status 4) but the target texture stays all-zero,
+  with no error. It persists with a full `NSApplication` + window + `MTKView`
+  run loop and drawable presentation, for shared and private storage alike;
+  compute passes are unaffected. The app's own render path (and its
+  `--screenshot`) produces correct output, so the discrepancy is something in the
+  app's setup vs a from-scratch harness, not display sleep (screenshots verified
+  real content while `pmset` reported the display off). Consequence: shader-side
+  UI like the 1.7 brush ring was verified through `--screenshot` output with a
+  temporary env-gated cursor injection (all ring pixels landed on the expected
+  circle, 1 px wide), not by live pointer interaction — no UI automation is
+  available in this session.
 
 ## Deferred — big architectural change
 

@@ -85,6 +85,10 @@ typedef struct {
     uint32_t displayMode;
     uint32_t palette;
     float glow;
+    float cursorX;
+    float cursorY;
+    float brushR;
+    float pad2;
 } Uniforms;
 
 // Per-plane statistics written by the gol_step kernel (buffer(3)): alive count
@@ -551,6 +555,9 @@ static int paintCount;
 @property (nonatomic, assign) CGFloat viewOffsetY;
 @property (nonatomic, assign) int tool;
 @property (nonatomic, assign) int brushRadius;
+@property (nonatomic, assign) double cursorGridX;
+@property (nonatomic, assign) double cursorGridY;
+@property (nonatomic, assign) BOOL cursorInside;
 @property (nonatomic, assign) BOOL panning;
 @property (nonatomic, assign) CGFloat lastPanX;
 @property (nonatomic, assign) CGFloat lastPanY;
@@ -756,6 +763,23 @@ static int paintCount;
     }
 }
 
+- (void)updateTrackingAreas {
+    NSTrackingArea *old;
+    NSTrackingArea *area;
+    NSTrackingAreaOptions options;
+
+    for (old in self.trackingAreas) {
+        [self removeTrackingArea:old];
+    }
+    options = (NSTrackingAreaOptions)(NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved |
+                                     NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect);
+    area = [[NSTrackingArea alloc] initWithRect:self.bounds
+                                       options:options
+                                         owner:self
+                                       userInfo:nil];
+    [self addTrackingArea:area];
+}
+
 @end
 
 @implementation App
@@ -822,6 +846,9 @@ static int paintCount;
 @synthesize viewOffsetY = _viewOffsetY;
 @synthesize tool = _tool;
 @synthesize brushRadius = _brushRadius;
+@synthesize cursorGridX = _cursorGridX;
+@synthesize cursorGridY = _cursorGridY;
+@synthesize cursorInside = _cursorInside;
 @synthesize panning = _panning;
 @synthesize lastPanX = _lastPanX;
 @synthesize lastPanY = _lastPanY;
@@ -1906,6 +1933,10 @@ static int paintCount;
     if (self.hoverLabel != nil) {
         self.hoverLabel.stringValue = @"--";
     }
+    if (self.cursorInside) {
+        self.cursorInside = NO;
+        [self markDirty];
+    }
 }
 
 - (void)updateHoverAtPoint:(NSPoint)pt {
@@ -1915,11 +1946,28 @@ static int paintCount;
     uint16_t v;
     size_t idx;
     NSString *text;
+    double gx;
+    double gy;
 
     col = 0;
     row = 0;
     if (self.hoverLabel == nil) {
         return;
+    }
+    if (self.cellPx >= 0.01) {
+        gx = (pt.x - self.viewOffsetX) / self.cellPx;
+        gy = (pt.y - self.viewOffsetY) / self.cellPx;
+        if (!self.cursorInside ||
+            FloorInt(gx) != FloorInt(self.cursorGridX) ||
+            FloorInt(gy) != FloorInt(self.cursorGridY)) {
+            self.cursorGridX = gx;
+            self.cursorGridY = gy;
+            self.cursorInside = YES;
+            [self markDirty];
+        } else {
+            self.cursorGridX = gx;
+            self.cursorGridY = gy;
+        }
     }
     if (![self gridCellAtPoint:pt col:&col row:&row]) {
         self.hoverLabel.stringValue = @"--";
@@ -2968,6 +3016,8 @@ static int paintCount;
     u->displayMode = self.displayMode;
     u->palette = self.palette;
     u->glow = self.glowOn ? 1.0f : 0.0f;
+    u->cursorX = -1e9f;
+    u->cursorY = -1e9f;
 
     // The pattern usually occupies a small central region of the grid, so map
     // the whole grid and it would render tiny. Instead, auto-fit the view to
@@ -3150,6 +3200,9 @@ static int paintCount;
     u->displayMode = self.displayMode;
     u->palette = self.palette;
     u->glow = self.glowOn ? 1.0f : 0.0f;
+    u->cursorX = self.cursorInside ? (float)self.cursorGridX : -1e9f;
+    u->cursorY = self.cursorInside ? (float)self.cursorGridY : -1e9f;
+    u->brushR = (float)self.brushRadius + 0.5f;
 
     if (self.running) {
         genPerSec = self.speedSlider ? self.speedSlider.doubleValue : 30.0;

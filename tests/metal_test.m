@@ -27,6 +27,10 @@ typedef struct {
     uint32_t displayMode;
     uint32_t palette;
     float glow;
+    float cursorX;
+    float cursorY;
+    float brushR;
+    float pad2;
 } Uniforms;
 
 static MTLSize MakeSize(int w, int h, int d) {
