@@ -100,6 +100,11 @@ Example:
 ./bin/gol --mode trails --preset acorn --run 1
 ```
 
+The app also remembers the last-used settings: display mode, palette, glow,
+speed, and density changed in the UI are saved and restored on the next launch,
+along with the window position and size. Explicit flags and environment
+variables always take precedence over the remembered values.
+
 ## Controls
 
 ### Mouse (on the canvas)

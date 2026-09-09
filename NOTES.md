@@ -55,6 +55,21 @@ would help.
   non-subpixel path is regression-free: a glider screenshot is byte-identical
   to the pre-change build. The interactive half of the plan's check (panning
   at deep zoom without shimmer) was not exercised — no UI automation.
+- **Settings + window persistence (1.9) verified headlessly with temporary
+  env-gated hooks:** a launch hook fired all four UI handlers and all five
+  values (mode, palette, glow, speed, density) plus the moved window frame
+  landed in the defaults domain; a fresh launch restored all five exactly.
+  CLI precedence held: `--mode`/`--density` overrode the saved values without
+  persisting them (domain unchanged after the run). The read path reaches the
+  renderer: a `--screenshot` under saved heatmap/turbo/no-glow settings gave a
+  blue-dominated turbo field (72% blue of bright pixels) vs the default
+  viridis/age/glow render (47% green). The window-frame autosave round-tripped
+  exactly once the display geometry was stable; when the headless display's
+  height changed between runs (1084↔1117 pt) AppKit re-centered the window —
+  its documented behavior when a saved frame's recorded screen no longer
+  matches. Known gap: the View-menu display/palette items call the setters
+  directly, so only the sidebar popups (and the glow button/menu item) persist.
+  Live quit/relaunch via real UI interaction was not exercised — no UI automation.
 
 ## Deferred — big architectural change
 

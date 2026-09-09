@@ -565,6 +565,8 @@ static int paintCount;
 @property (nonatomic, assign) uint32_t displayMode;
 @property (nonatomic, assign) uint32_t palette;
 @property (nonatomic, assign) BOOL glowOn;
+@property (nonatomic, assign) double speedValue;
+@property (nonatomic, assign) double densityValue;
 @property (nonatomic, strong) NSPopUpButton *displayPopup;
 @property (nonatomic, strong) NSPopUpButton *palettePopup;
 @property (nonatomic, strong) NSArray<NSMenuItem *> *displayItems;
@@ -856,6 +858,8 @@ static int paintCount;
 @synthesize displayMode = _displayMode;
 @synthesize palette = _palette;
 @synthesize glowOn = _glowOn;
+@synthesize speedValue = _speedValue;
+@synthesize densityValue = _densityValue;
 @synthesize displayPopup = _displayPopup;
 @synthesize palettePopup = _palettePopup;
 @synthesize displayItems = _displayItems;
@@ -919,6 +923,7 @@ static int paintCount;
         val = density;
         if (val < 0.0) val = 0.0;
         if (val > 1.0) val = 1.0;
+        self.densityValue = val;
         self.densitySlider.doubleValue = val;
     }
     if (zoomSet && zoom > 0.0) { self.cellPx = zoom; }
@@ -952,6 +957,9 @@ static int paintCount;
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
     CFTimeInterval now;
     NSRunLoop *runLoop;
+    NSUserDefaults *defaults;
+    NSInteger saved;
+    double savedD;
     (void)note;
     now = CFAbsoluteTimeGetCurrent();
     self.frameIndex = 0;
@@ -981,6 +989,41 @@ static int paintCount;
     self.displayMode = DISPLAY_AGE;
     self.palette = PALETTE_VIRIDIS;
     self.glowOn = YES;
+    self.speedValue = 30.0;
+    self.densityValue = 0.2;
+
+    // Restore the last-used settings, then let setupUI build the controls
+    // from them; applyLaunchConfig runs afterwards and still wins for
+    // anything passed explicitly.
+    defaults = [NSUserDefaults standardUserDefaults];
+    if ([defaults objectForKey:@"displayMode"] != nil) {
+        saved = [defaults integerForKey:@"displayMode"];
+        if (saved >= 0 && saved <= (int)DISPLAY_HEATMAP) {
+            self.displayMode = (uint32_t)saved;
+        }
+    }
+    if ([defaults objectForKey:@"palette"] != nil) {
+        saved = [defaults integerForKey:@"palette"];
+        if (saved >= 0 && saved <= (int)PALETTE_TURBO) {
+            self.palette = (uint32_t)saved;
+        }
+    }
+    if ([defaults objectForKey:@"glow"] != nil) {
+        self.glowOn = [defaults boolForKey:@"glow"];
+    }
+    if ([defaults objectForKey:@"speed"] != nil) {
+        savedD = [defaults doubleForKey:@"speed"];
+        if (savedD >= 1.0 && savedD <= 600.0) {
+            self.speedValue = savedD;
+        }
+    }
+    if ([defaults objectForKey:@"density"] != nil) {
+        savedD = [defaults doubleForKey:@"density"];
+        if (savedD >= 0.0 && savedD <= 1.0) {
+            self.densityValue = savedD;
+        }
+    }
+
     if (![self setupMetal]) {
         NSLog(@"Metal setup failed");
         [NSApp terminate:nil];
@@ -1729,6 +1772,7 @@ static int paintCount;
         return;
     }
     [self setDisplayModeIndex:self.displayPopup.indexOfSelectedItem];
+    [[NSUserDefaults standardUserDefaults] setInteger:(NSInteger)self.displayMode forKey:@"displayMode"];
 }
 
 - (void)setDisplayModeIndex:(NSInteger)index {
@@ -1759,6 +1803,7 @@ static int paintCount;
         return;
     }
     [self setPaletteIndex:self.palettePopup.indexOfSelectedItem];
+    [[NSUserDefaults standardUserDefaults] setInteger:(NSInteger)self.palette forKey:@"palette"];
 }
 
 - (void)setPaletteIndex:(NSInteger)index {
@@ -1786,6 +1831,7 @@ static int paintCount;
     if (self.glowButton != nil) {
         self.glowButton.state = self.glowOn ? NSControlStateValueOn : NSControlStateValueOff;
     }
+    [[NSUserDefaults standardUserDefaults] setBool:self.glowOn forKey:@"glow"];
     [self markDirty];
 }
 
@@ -2014,8 +2060,12 @@ static int paintCount;
         if (self.speedLabel != nil) {
             self.speedLabel.stringValue = [NSString stringWithFormat:@"%d gen/s", val];
         }
+        self.speedValue = self.speedSlider.doubleValue;
+        [[NSUserDefaults standardUserDefaults] setDouble:self.speedValue forKey:@"speed"];
         return;
     }
+    self.densityValue = self.densitySlider.doubleValue;
+    [[NSUserDefaults standardUserDefaults] setDouble:self.densityValue forKey:@"density"];
     [self randomize];
 }
 
@@ -2286,6 +2336,8 @@ static int paintCount;
     NSBox *separator;
     NSView *spacer;
     NSView *sidePanel;
+    NSString *speedText;
+    NSString *densityText;
     __weak App *weakSelf;
 
     content = NSMakeRect(0, 0, VIEW_W, VIEW_H + BAR_H);
@@ -2303,6 +2355,7 @@ static int paintCount;
     [self.window setBackgroundColor:[NSColor colorWithSRGBRed:0.04 green:0.05 blue:0.08 alpha:1.0]];
     [self.window setDelegate:self];
     self.window.acceptsMouseMovedEvents = YES;
+    [self.window setFrameAutosaveName:@"GOLMain"];
     [self.window center];
 
     screen = ScreenForWindow(self.window);
@@ -2390,7 +2443,7 @@ static int paintCount;
     self.speedSlider = [[NSSlider alloc] initWithFrame:NSMakeRect(0, 0, 105, 20)];
     self.speedSlider.minValue = 1.0;
     self.speedSlider.maxValue = 600.0;
-    self.speedSlider.doubleValue = 30.0;
+    self.speedSlider.doubleValue = self.speedValue;
     self.speedSlider.allowsTickMarkValuesOnly = NO;
     self.speedSlider.numberOfTickMarks = 7;
     self.speedSlider.continuous = YES;
@@ -2398,14 +2451,15 @@ static int paintCount;
     self.speedSlider.action = @selector(sliderChanged:);
     self.speedSlider.translatesAutoresizingMaskIntoConstraints = NO;
     [self.speedSlider.widthAnchor constraintEqualToConstant:105.0].active = YES;
-    self.speedLabel = MakeValueLabel(@"30 gen/s", NSZeroRect);
+    speedText = [NSString stringWithFormat:@"%d gen/s", FloorInt(self.speedValue)];
+    self.speedLabel = MakeValueLabel(speedText, NSZeroRect);
     speedName = MakeLabelSmall(@"Speed", NSZeroRect);
     StackAdd(simRow, HGroup(speedName, self.speedSlider, self.speedLabel));
 
     self.densitySlider = [[NSSlider alloc] initWithFrame:NSMakeRect(0, 0, 90, 20)];
     self.densitySlider.minValue = 0.0;
     self.densitySlider.maxValue = 1.0;
-    self.densitySlider.doubleValue = 0.2;
+    self.densitySlider.doubleValue = self.densityValue;
     self.densitySlider.allowsTickMarkValuesOnly = NO;
     self.densitySlider.numberOfTickMarks = 0;
     self.densitySlider.continuous = YES;
@@ -2413,7 +2467,8 @@ static int paintCount;
     self.densitySlider.action = @selector(sliderChanged:);
     self.densitySlider.translatesAutoresizingMaskIntoConstraints = NO;
     [self.densitySlider.widthAnchor constraintEqualToConstant:90.0].active = YES;
-    self.densityPct = MakeValueLabel(@"20%", NSZeroRect);
+    densityText = [NSString stringWithFormat:@"%d%%", LroundInt(self.densityValue * 100.0)];
+    self.densityPct = MakeValueLabel(densityText, NSZeroRect);
     densityName = MakeLabelSmall(@"Density", NSZeroRect);
     StackAdd(simRow, HGroup(densityName, self.densitySlider, self.densityPct));
 
@@ -2463,7 +2518,7 @@ static int paintCount;
     [self.displayPopup addItemWithTitle:@"Age"];
     [self.displayPopup addItemWithTitle:@"Trails"];
     [self.displayPopup addItemWithTitle:@"Heatmap"];
-    [self.displayPopup selectItemAtIndex:0];
+    [self.displayPopup selectItemAtIndex:(int)self.displayMode];
     self.displayPopup.target = self;
     self.displayPopup.action = @selector(displayChanged:);
     StackAdd(viewRow, HGroup(displayName, self.displayPopup, nil));
