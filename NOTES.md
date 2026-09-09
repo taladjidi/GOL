@@ -55,6 +55,6 @@ would help.
 ## Deferred — gameplay / UX
 
 - **Save / Load** patterns (RLE and/or PNG).
-- **Cursor tooltip** near the pointer instead of only in the status bar.
+- **Cursor tooltip** near the pointer instead of only in the side readout panel.
 - **Non-wrapping edges** option (the torus is currently hard-coded in both the
   GPU kernel and `gol_step_cpu`).

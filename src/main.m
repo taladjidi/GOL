@@ -40,6 +40,7 @@ static const CGFloat MAX_CELL_PX = 128.0;
 static const int VIEW_W = (int)(INITIAL_GRID_W * CELL_PX);
 static const int VIEW_H = (int)(INITIAL_GRID_H * CELL_PX);
 static const int BAR_H = 120;
+static const CGFloat SIDE_W = 190.0;
 static const int RENDER_SCALE = 1;
 static const int PLANE_COUNT = 3;
 // Total simulation memory budget: the shared grid buffer and the cell + trail
@@ -2199,6 +2200,7 @@ static int paintCount;
     NSTextField *trendName;
     NSBox *separator;
     NSView *spacer;
+    NSView *sidePanel;
     __weak App *weakSelf;
 
     content = NSMakeRect(0, 0, VIEW_W, VIEW_H + BAR_H);
@@ -2223,7 +2225,8 @@ static int paintCount;
 
     contentView = [self.window contentView];
 
-    // The Metal view fills the top of the window, down to just above the bar.
+    // The Metal view fills the top of the window, down to just above the bar
+    // and left of the side panel.
     self.mtkView.translatesAutoresizingMaskIntoConstraints = NO;
     [contentView addSubview:self.mtkView];
 
@@ -2461,11 +2464,6 @@ static int paintCount;
     self.maxAgeLabel = MakeValueLabel(@"Age 0", NSZeroRect);
     StackAdd(statusRow, self.maxAgeLabel);
 
-    self.hoverLabel = MakeLabelSmall(@"--", NSZeroRect);
-    self.hoverLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-    [self.hoverLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
-    StackAdd(statusRow, self.hoverLabel);
-
     spacer = [[NSView alloc] init];
     [spacer setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     [spacer setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
@@ -2487,16 +2485,39 @@ static int paintCount;
 
     [bar addArrangedSubview:statusRow];
 
-    // --- Pin the bar to the bottom; the Metal view fills the space above it. ---
+    // --- Side panel: the hover readout, right of the canvas. Its width is
+    // fixed, so the changing text can never move the canvas. ---
+    sidePanel = [[NSView alloc] init];
+    sidePanel.translatesAutoresizingMaskIntoConstraints = NO;
+    sidePanel.wantsLayer = YES;
+    sidePanel.layer.cornerRadius = 6.0;
+    sidePanel.layer.backgroundColor = [NSColor colorWithSRGBRed:0.07 green:0.08 blue:0.11 alpha:1.0].CGColor;
+    [contentView addSubview:sidePanel];
+
+    self.hoverLabel = MakeLabelSmall(@"--", NSZeroRect);
+    self.hoverLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    [self.hoverLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    self.hoverLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [sidePanel addSubview:self.hoverLabel];
+
+    // --- Pin the bar to the bottom; the Metal view fills the space above it
+    // and left of the side panel. ---
     [NSLayoutConstraint activateConstraints:@[
         [bar.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:8.0],
         [bar.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-8.0],
         [bar.bottomAnchor constraintEqualToAnchor:contentView.bottomAnchor constant:-8.0],
         [statusRow.widthAnchor constraintEqualToAnchor:bar.widthAnchor],
         [self.mtkView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:8.0],
-        [self.mtkView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-8.0],
+        [self.mtkView.trailingAnchor constraintEqualToAnchor:sidePanel.leadingAnchor constant:-8.0],
         [self.mtkView.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:8.0],
-        [self.mtkView.bottomAnchor constraintEqualToAnchor:bar.topAnchor constant:-8.0]
+        [self.mtkView.bottomAnchor constraintEqualToAnchor:bar.topAnchor constant:-8.0],
+        [sidePanel.widthAnchor constraintEqualToConstant:SIDE_W],
+        [sidePanel.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-8.0],
+        [sidePanel.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:8.0],
+        [sidePanel.bottomAnchor constraintEqualToAnchor:bar.topAnchor constant:-8.0],
+        [self.hoverLabel.leadingAnchor constraintEqualToAnchor:sidePanel.leadingAnchor constant:8.0],
+        [self.hoverLabel.trailingAnchor constraintEqualToAnchor:sidePanel.trailingAnchor constant:-8.0],
+        [self.hoverLabel.topAnchor constraintEqualToAnchor:sidePanel.topAnchor constant:8.0]
     ]];
 
     weakSelf = self;

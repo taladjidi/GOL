@@ -110,7 +110,7 @@ Example:
 | Right drag | Paint with the opposite of the active tool |
 | Scroll wheel | Zoom in/out at the cursor |
 | Option + left drag, or middle drag | Pan the camera |
-| Hover | Shows cell coordinates and age in the status bar |
+| Hover | Shows cell coordinates and age in the readout panel right of the canvas |
 
 ### Keyboard
 
