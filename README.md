@@ -18,12 +18,12 @@ effect, and three display modes.
   generations), which the Age and Heatmap display modes visualize.
 - **Viewport-scaled grid**: the computational window grows and shrinks with
   what you can see: zoom out and the grid expands to cover the viewport (up to
-  a 1 GiB total memory budget, about 12 bytes per cell — tens of millions of
+  a 1 GiB total memory budget, about 14 bytes per cell — tens of millions of
   cells), zoom in and it contracts. Patterns are preserved across resizes.
 - **Camera**: scroll to zoom at the cursor, Option-drag (or middle-drag) to
-  pan. At sub-pixel zoom levels the renderer switches to linear filtering with
-  premultiplied alpha compositing so shrunken patterns stay smooth instead of
-  aliasing.
+  pan. At sub-pixel zoom levels the renderer samples a mipmapped cell texture
+  with linear filtering and premultiplied alpha compositing, so a dense field
+  shrinks into a smooth density map instead of aliasing into noise.
 - **Arbitrary rules**: a famous-rules drop-down (Life, HighLife, Day & Night,
   Seeds, Maze, Life w/o Death, Replicator, Diamoeba) plus per-neighbor B/S
   toggles define any birth/survival subset of the 8 neighbors (defaults to

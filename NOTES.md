@@ -46,6 +46,15 @@ would help.
   temporary env-gated cursor injection (all ring pixels landed on the expected
   circle, 1 px wide), not by live pointer interaction — no UI automation is
   available in this session.
+- **Mipmap subpixel sampling (1.8) verified by same-soup A/B through
+  `--screenshot`:** with a temporary env-gated zoom + RNG-seed injection, the
+  same random soup rendered at 4 cells/px through the old single bilinear tap
+  vs the new mipmapped tap. High-frequency energy (mean |pixel − neighbor
+  mean| over the rendered region) dropped **54.6 → 30.7 per pixel** and the
+  field went from isolated sparkle spikes to a smooth density map. The
+  non-subpixel path is regression-free: a glider screenshot is byte-identical
+  to the pre-change build. The interactive half of the plan's check (panning
+  at deep zoom without shimmer) was not exercised — no UI automation.
 
 ## Deferred — big architectural change
 

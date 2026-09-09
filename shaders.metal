@@ -133,6 +133,7 @@ constant uint kDisplayTrails = 1u;
 constant uint kDisplayHeatmap = 2u;
 
 constexpr sampler s_linear(filter::linear, address::clamp_to_edge);
+constexpr sampler s_mip(filter::linear, mip_filter::linear, address::clamp_to_edge);
 
 // Renders the active grid plane into a small cell texture.
 // Cell packing: bit 0 = alive, bits 1..15 = age.
@@ -208,7 +209,13 @@ static float BrushRing(float2 gridF, float2 scale, constant Uniforms &u) {
             float t = trail.sample(s_linear, tcoordF).r;
             sample = float4(Ramp(t, u.palette), t);
         } else {
-            sample = tex.sample(s_linear, tcoordF);
+            // Mipmapped tap at the exact fractional position: a fixed bilinear
+            // tap sees only a few of the many cells under a pixel and sparkles;
+            // the lod matching the zoom averages them into a smooth density map.
+            float2 uv = gridF /
+                float2(static_cast<float>(u.gridW), static_cast<float>(u.gridH));
+            float lod = log2(max(max(u.viewScaleX, u.viewScaleY), 1.0f));
+            sample = tex.sample(s_mip, uv, level(lod));
         }
         float3 col = bg.rgb * (1.0f - sample.a) + sample.rgb;
         col += sample.rgb * u.glow * 0.3f;

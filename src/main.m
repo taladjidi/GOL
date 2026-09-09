@@ -49,11 +49,12 @@ static const int PLANE_COUNT = 3;
 static const NSUInteger MAX_TOTAL_MEMORY = 1024u * 1024u * 1024u; // 1 GiB
 // Peak per-cell footprint in bytes when the grid is at its maximum size:
 //   gridBuf  PLANE_COUNT * sizeof(uint16_t)  (3 planes, shared)
-//   cellTex  4 * RENDER_SCALE^2              (BGRA8Unorm)
+//   cellTex  4 * RENDER_SCALE^2 * 4/3        (BGRA8Unorm + full mip chain,
+//                                             rounded up to 6 bytes/cell)
 //   trailTex 2 * RENDER_SCALE^2              (R16Unorm intensity)
 static const NSUInteger BYTES_PER_CELL =
     PLANE_COUNT * (NSUInteger)sizeof(uint16_t) +
-    4u * (NSUInteger)(RENDER_SCALE * RENDER_SCALE) +
+    6u * (NSUInteger)(RENDER_SCALE * RENDER_SCALE) +
     2u * (NSUInteger)(RENDER_SCALE * RENDER_SCALE);
 static const int MAX_TEXTURE_SIZE = 16384;
 static const uint32_t DISPLAY_AGE = 0u;
@@ -2238,7 +2239,7 @@ static int paintCount;
     d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:self.mtkView.colorPixelFormat
                                                             width:w
                                                            height:h
-                                                       mipmapped:NO];
+                                                       mipmapped:YES];
     d.usage = (MTLTextureUsage)(MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead);
     d.storageMode = MTLStorageModePrivate;
     self.cellTex = [self.device newTextureWithDescriptor:d];
@@ -2952,6 +2953,7 @@ static int paintCount;
     GOLRules r;
     Uniforms *u;
     id<MTLCommandBuffer> cb;
+    id<MTLBlitCommandEncoder> blit;
     MTLTextureDescriptor *d;
     id<MTLTexture> outTex;
     uint16_t *cells;
@@ -3078,6 +3080,13 @@ static int paintCount;
         return;
     }
     [self renderCellPlane:self.displayPlane cb:cb];
+    if (u->viewScaleX > 1.0f || u->viewScaleY > 1.0f) {
+        blit = [cb blitCommandEncoder];
+        if (blit != nil) {
+            [blit generateMipmapsForTexture:self.cellTex];
+            [blit endEncoding];
+        }
+    }
     [self renderFrameToTexture:outTex cb:cb];
     [cb commit];
     [cb waitUntilCompleted];
@@ -3129,6 +3138,7 @@ static int paintCount;
     MTLRenderPassDescriptor *crp;
     id<MTLRenderCommandEncoder> cenc;
     MTLViewport cvp;
+    id<MTLBlitCommandEncoder> blit;
     MTLRenderPassDescriptor *rp;
     id<MTLRenderCommandEncoder> rend;
     MTLViewport vp;
@@ -3350,6 +3360,13 @@ static int paintCount;
         [cenc setFragmentBuffer:self.uniformsBuf offset:0 atIndex:1];
         [cenc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
         [cenc endEncoding];
+        if (u->viewScaleX > 1.0f || u->viewScaleY > 1.0f) {
+            blit = [cb blitCommandEncoder];
+            if (blit != nil) {
+                [blit generateMipmapsForTexture:self.cellTex];
+                [blit endEncoding];
+            }
+        }
     }
 
     if (willStep && self.displayMode == DISPLAY_TRAILS && self.trailStepPipeline != nil &&
