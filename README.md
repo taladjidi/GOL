@@ -1,5 +1,7 @@
 # GOL: Game of Life on the GPU
 
+[![CI](https://github.com/taladjidi/GOL/actions/workflows/ci.yml/badge.svg)](https://github.com/taladjidi/GOL/actions/workflows/ci.yml)
+
 <p align="center">
   <img src="images/header.gif" width="600" alt="Trails mode: a random soup evolving with phosphor-style persistence">
 </p>
@@ -53,32 +55,63 @@ R-Pentomino simulation:
 
 - macOS 12.0 or later, with the Xcode Command Line Tools
   (`xcode-select --install`), which provides `clang`, the Metal SDK, and
-  `xcrun`. The binary is built as a universal (arm64 + x86_64) executable.
+  `xcrun`. Both the app and the bare binary are built as universal
+  (arm64 + x86_64) executables.
 
 ## Build and Run
 
 ```sh
-make run        # builds bin/GOL.app (the app bundle) and launches it
+make run        # builds the app bundle and launches it
 ```
 
-Other targets:
+That's all you need for a first run: `make run` assembles `bin/GOL.app`,
+a self-contained app bundle, and opens it.
 
-```sh
-make app       # build the bin/GOL.app bundle only (does not launch)
-make run-bare  # build and run the bare bin/gol binary (no bundle)
-make all       # build only (bin/gol, bin/default.metallib)
-make test      # run the CPU and Metal test suites
-make dist      # build a distributable dist/GOL-<version>.dmg
-make clean     # remove bin/ and build/ (keeps dist/)
-make distclean # also remove dist/
-```
+All targets:
+
+| Target | What it does |
+| --- | --- |
+| `make run` | Build `bin/GOL.app` and launch it |
+| `make app` | Build `bin/GOL.app` only (does not launch) |
+| `make run-bare` | Build and run the bare `bin/gol` binary (no bundle) |
+| `make all` *(default)* | Build `bin/gol` and `bin/default.metallib` only |
+| `make test` | Build everything and run the CPU and Metal test suites |
+| `make dist` | Write a distributable `dist/GOL-<version>.dmg` |
+| `make notarize` | Sign with a Developer ID and notarize (see [Distribution](#distribution)) |
+| `make install` | Install the `gol` command to `/usr/local/bin` (also builds the app) |
+| `make clean` | Remove `bin/` and `build/` (keeps `dist/`) |
+| `make distclean` | Also remove `dist/` |
 
 `bin/GOL.app` is a self-contained bundle: `Contents/MacOS/gol`,
-`Contents/Resources/default.metallib`, and (once the icon exists) `GOL.icns`.
-The bare `bin/gol` binary still works for scripting and the test suite.
+`Contents/Resources/default.metallib`, and `GOL.icns`, ad-hoc signed so it
+runs on the machine that built it. Inside the bundle the shader library loads
+through Metal's default-library lookup; the bare `bin/gol` binary instead finds
+`default.metallib` next to itself, so it keeps working for scripting and the
+test suite.
 
 The whole project compiles with `-Weverything` (C, Objective-C, and Metal)
-and ships warning-free.
+and ships warning-free. Every push is built and tested by CI on a macOS
+runner.
+
+## Distribution
+
+`make dist` writes `dist/GOL-<version>.dmg`: mount the disk image and drag
+GOL into Applications.
+
+The bundle is ad-hoc signed, which is enough to run it locally but not enough
+to satisfy Gatekeeper on another Mac. To share the app, sign and notarize it
+with your Apple Developer credentials:
+
+```sh
+make notarize SIGN_ID="Developer ID Application: Your Name (TEAMID)" \
+              NOTARY_PROFILE=your-notary-profile
+```
+
+`SIGN_ID` is a "Developer ID Application" certificate in your keychain and
+`NOTARY_PROFILE` is an `xcrun notarytool store-credentials` profile. The
+target re-signs the bundle with the hardened runtime, submits it for
+notarization, and staples the ticket, so the app opens without warning on any
+macOS 12+ machine.
 
 ## Launch options
 
@@ -93,12 +126,20 @@ equivalent, and a flag takes precedence over the corresponding variable:
 | `--density 0.0-1.0` | `GOL_DENSITY` | Fill probability of the initial soup (default 0.2) |
 | `--zoom PX` | `GOL_ZOOM` | Starting pixels per cell (default 6) |
 | `--run 0\|1` | `GOL_RUN` | Start running (1) or paused (0, the default) |
+| `--screenshot PATH` | `GOL_SCREENSHOT` | Render a frame to a PNG at `PATH`, then quit (`--gen` and `--size` below apply) |
+| `--gen N` | `GOL_GEN` | Generations to run before a screenshot (default 300) |
+| `--size N` | `GOL_SIZE` | Screenshot output size, N×N pixels (default 1024) |
 
 Example:
 
 ```sh
 ./bin/gol --mode trails --preset acorn --run 1
 ```
+
+The flags work with the bundle too: `open bin/GOL.app --args --mode trails`.
+Environment variables work with the bare binary, but `open` launches through
+LaunchServices and does not pass the shell environment, so use `./bin/gol`
+when launching by env var.
 
 The app also remembers the last-used settings: display mode, palette, glow,
 speed, and density changed in the UI are saved and restored on the next launch,
@@ -196,6 +237,7 @@ src/main.m        App, UI, camera, Metal setup, render loop (Objective-C)
 src/gol.c/.h      CPU simulation helpers (rules, packing, resize, presets)
 shaders.metal     Step, cell-texture, trail, and scale shaders
 tests/            CPU reference tests and Metal kernel tests
-packaging/        App bundle Info.plist (and icon source)
-Makefile          Warning-free build, test, and run targets
+packaging/        App bundle Info.plist and icon source
+Makefile          Warning-free build, test, run, and distribution targets
+.github/          CI workflow (build + test on a macOS runner)
 ```
