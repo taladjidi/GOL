@@ -5,6 +5,7 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <ImageIO/ImageIO.h>
 #include "gol.h"
+#include "gol_engine.h"
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
@@ -91,15 +92,6 @@ typedef struct {
     float brushR;
     float pad2;
 } Uniforms;
-
-// Per-plane statistics written by the gol_step kernel (buffer(3)): alive count
-// and max age of the plane just written. One 16-byte slot per plane.
-typedef struct {
-    uint32_t alive;
-    uint32_t maxAge;
-    uint32_t pad0;
-    uint32_t pad1;
-} GOLStats;
 
 static MTLSize MakeSize(int w, int h, int d) {
     MTLSize s;
@@ -509,6 +501,8 @@ static int paintCount;
 @property (nonatomic, strong) id<MTLBuffer> gridBuf;
 @property (nonatomic, strong) id<MTLBuffer> uniformsBuf;
 @property (nonatomic, strong) id<MTLBuffer> statsBuf;
+@property (nonatomic, assign) GOLGrid *grid;
+@property (nonatomic, assign) GOLEngine *engine;
 @property (nonatomic, strong) id<MTLCommandBuffer> cb0;
 @property (nonatomic, strong) id<MTLCommandBuffer> cb1;
 @property (nonatomic, strong) id<MTLCommandBuffer> cb2;
@@ -802,6 +796,8 @@ static int paintCount;
 @synthesize gridBuf = _gridBuf;
 @synthesize uniformsBuf = _uniformsBuf;
 @synthesize statsBuf = _statsBuf;
+@synthesize grid = _grid;
+@synthesize engine = _engine;
 @synthesize cb0 = _cb0;
 @synthesize cb1 = _cb1;
 @synthesize cb2 = _cb2;
@@ -1303,8 +1299,34 @@ static int paintCount;
         self.trailClearPipeline = nil;
     }
 
+    self.grid = gol_grid_alloc();
+    if (self.grid == nil) {
+        return NO;
+    }
+    gol_grid_wrap(self.grid, self.gridW, self.gridH, self.planeCells,
+                  PLANE_COUNT, (uint16_t *)[self.gridBuf contents],
+                  (__bridge void *)self.gridBuf);
+    if (self.stepPipeline != nil) {
+        self.engine = gol_engine_create_metal(self.grid,
+                                              (__bridge void *)self.stepPipeline,
+                                              (__bridge void *)self.gridBuf,
+                                              (__bridge void *)self.uniformsBuf,
+                                              (__bridge void *)self.statsBuf);
+    } else {
+        self.engine = gol_engine_create_cpu(self.grid);
+    }
+    if (self.engine == nil) {
+        gol_grid_free(self.grid);
+        self.grid = nil;
+        return NO;
+    }
+
     [self rebuildCellTexture];
     if (self.cellTex == nil) {
+        gol_engine_destroy(self.engine);
+        self.engine = nil;
+        gol_grid_free(self.grid);
+        self.grid = nil;
         return NO;
     }
 
@@ -2168,12 +2190,10 @@ static int paintCount;
 }
 
 - (uint16_t *)planePointer:(uint32_t)plane {
-    uint16_t *base;
-    if (self.gridBuf == nil) {
+    if (self.grid == nil || self.gridBuf == nil) {
         return nil;
     }
-    base = (uint16_t *)[self.gridBuf contents];
-    return base + (size_t)plane * (size_t)self.planeCells;
+    return gol_grid_plane(self.grid, plane);
 }
 
 - (uint16_t *)currentCells {
@@ -2201,7 +2221,7 @@ static int paintCount;
 
     (void)pixelSize;
     self.needsGridResize = NO;
-    if (self.gridBuf == nil || self.mtkView == nil ||
+    if (self.grid == nil || self.gridBuf == nil || self.mtkView == nil ||
         self.cellPx < 0.01) {
         return;
     }
@@ -2242,6 +2262,7 @@ static int paintCount;
                     self.planeCells, srcX, srcY);
     self.gridW = newW;
     self.gridH = newH;
+    gol_grid_set_size(self.grid, newW, newH);
     self.viewOffsetX = 0.0;
     self.viewOffsetY = 0.0;
 
@@ -2899,7 +2920,11 @@ static int paintCount;
     if (n <= 0) {
         return;
     }
+    if (self.grid == nil || self.engine == nil) {
+        return;
+    }
     r = self.rules;
+    gol_engine_set_rules(self.engine, r);
     curPlane = (uint32_t)(self.frameIndex % (uint32_t)PLANE_COUNT);
     u = (Uniforms *)[self.uniformsBuf contents];
     u->gridW = (uint32_t)self.gridW;
@@ -2952,25 +2977,8 @@ static int paintCount;
         readPlane = (curPlane + (uint32_t)(stepIdx - 1)) % (uint32_t)PLANE_COUNT;
         wp = (curPlane + (uint32_t)stepIdx) % (uint32_t)PLANE_COUNT;
 
-        if (self.stepPipeline != nil) {
-            enc = [cb computeCommandEncoder];
-            if (enc != nil) {
-                [enc setComputePipelineState:self.stepPipeline];
-                [enc setBuffer:self.gridBuf offset:(NSUInteger)readPlane * self.planeBytes atIndex:0];
-                [enc setBuffer:self.gridBuf offset:(NSUInteger)wp * self.planeBytes atIndex:1];
-                [enc setBuffer:self.uniformsBuf offset:0 atIndex:2];
-                [enc setBuffer:self.statsBuf offset:(NSUInteger)wp * sizeof(GOLStats) atIndex:3];
-                [enc dispatchThreadgroups:MakeSize((int)gx, (int)gy, 1)
-                  threadsPerThreadgroup:MakeSize((int)tgW, (int)tgH, 1)];
-                [enc endEncoding];
-            }
-        } else {
-            cur = [self planePointer:readPlane];
-            write = [self planePointer:wp];
-            if (cur != nil && write != nil) {
-                gol_step_cpu(cur, write, self.gridW, self.gridH, r);
-            }
-        }
+        (void)gol_engine_step_single(self.engine, (__bridge void *)cb,
+                                     readPlane, wp);
 
         [self renderCellPlane:wp cb:cb];
 
@@ -3019,7 +3027,8 @@ static int paintCount;
 
     if (self.device == nil || self.queue == nil ||
         self.renderPipeline == nil || self.scalePipeline == nil ||
-        self.uniformsBuf == nil || self.gridBuf == nil) {
+        self.uniformsBuf == nil || self.gridBuf == nil ||
+        self.grid == nil || self.engine == nil) {
         NSLog(@"screenshot: Metal not ready");
         [NSApp terminate:nil];
         return;
@@ -3051,6 +3060,7 @@ static int paintCount;
 
     self.gridW = G;
     self.gridH = G;
+    gol_grid_set_size(self.grid, G, G);
     [self rebuildCellTexture];
 
     if (self.launchPreset != nil && self.launchPreset.length > 0) {
@@ -3179,17 +3189,11 @@ static int paintCount;
     BOOL oldestDone;
     uint32_t planeA;
     uint32_t planeB;
-    uint32_t readPlane;
-    uint32_t wp;
-    uint32_t plane;
-    int stepIdx;
     NSUInteger tgW;
     NSUInteger tgH;
     NSUInteger gx;
     NSUInteger gy;
     id<MTLComputeCommandEncoder> enc;
-    uint16_t *cur;
-    uint16_t *write;
     MTLRenderPassDescriptor *crp;
     id<MTLRenderCommandEncoder> cenc;
     MTLViewport cvp;
@@ -3198,17 +3202,16 @@ static int paintCount;
     id<MTLRenderCommandEncoder> rend;
     MTLViewport vp;
     BOOL needCell;
-    uint16_t *cells;
-    int alive;
-    int maxAge;
-    GOLStats *s;
+    uint32_t alive;
+    uint32_t maxAge;
     uint32_t stepGen;
     __weak App *weakSelf;
     CFTimeInterval fpsDt;
     int fps;
 
     if (self.mtkView == nil || self.queue == nil || self.renderPipeline == nil ||
-        self.scalePipeline == nil || self.uniformsBuf == nil || self.gridBuf == nil) {
+        self.scalePipeline == nil || self.uniformsBuf == nil || self.gridBuf == nil ||
+        self.grid == nil || self.engine == nil) {
         return;
     }
 
@@ -3239,6 +3242,7 @@ static int paintCount;
     now = CFAbsoluteTimeGetCurrent();
 
     r = self.rules;
+    gol_engine_set_rules(self.engine, r);
     u = (Uniforms *)[self.uniformsBuf contents];
     u->gridW = (uint32_t)self.gridW;
     u->gridH = (uint32_t)self.gridH;
@@ -3314,70 +3318,32 @@ static int paintCount;
                           oldest.status == MTLCommandBufferStatusError;
         }
         if (oldestDone) {
-            s = (GOLStats *)[self.statsBuf contents];
-            for (plane = 0; plane < (uint32_t)PLANE_COUNT; plane++) {
-                memset(&s[plane], 0, sizeof(GOLStats));
+            if (gol_engine_step_range(self.engine, (__bridge void *)cb,
+                                      curPlane, (uint32_t)gensToAdvance)) {
+                writePlane = (curPlane + (uint32_t)gensToAdvance) %
+                             (uint32_t)PLANE_COUNT;
+                renderPlane = writePlane;
+                self.displayPlane = writePlane;
+                self.completedPlane = curPlane;
+                willStep = YES;
+                [self setCB:cb at:writePlane];
             }
-            tgW = 16;
-            tgH = 16;
-            gx = ((NSUInteger)self.gridW + tgW - 1) / tgW;
-            gy = ((NSUInteger)self.gridH + tgH - 1) / tgH;
-            enc = [cb computeCommandEncoder];
-            [enc setComputePipelineState:self.stepPipeline];
-            for (stepIdx = 1; stepIdx <= gensToAdvance; stepIdx++) {
-                readPlane = (curPlane + (uint32_t)(stepIdx - 1)) %
-                            (uint32_t)PLANE_COUNT;
-                wp = (curPlane + (uint32_t)stepIdx) % (uint32_t)PLANE_COUNT;
-                [enc setBuffer:self.gridBuf
-                       offset:(NSUInteger)readPlane * self.planeBytes
-                      atIndex:0];
-                [enc setBuffer:self.gridBuf
-                       offset:(NSUInteger)wp * self.planeBytes
-                      atIndex:1];
-                [enc setBuffer:self.uniformsBuf offset:0 atIndex:2];
-                [enc setBuffer:self.statsBuf
-                       offset:wp * sizeof(GOLStats)
-                      atIndex:3];
-                [enc dispatchThreadgroups:MakeSize((int)gx, (int)gy, 1)
-                  threadsPerThreadgroup:MakeSize((int)tgW, (int)tgH, 1)];
-                if (stepIdx < gensToAdvance) {
-                    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
-                }
-            }
-            [enc endEncoding];
+        }
+    } else if (gensToAdvance > 0) {
+        if (gol_engine_step_range(self.engine, NULL, curPlane,
+                                  (uint32_t)gensToAdvance)) {
             writePlane = (curPlane + (uint32_t)gensToAdvance) %
                          (uint32_t)PLANE_COUNT;
             renderPlane = writePlane;
             self.displayPlane = writePlane;
-            self.completedPlane = curPlane;
+            self.completedPlane = writePlane;
             willStep = YES;
-            [self setCB:cb at:writePlane];
+            alive = 0;
+            maxAge = 0;
+            gol_engine_count(self.engine, writePlane, &alive, &maxAge);
+            [self setPopulation:alive maxAge:maxAge
+               forGeneration:self.gen + (uint32_t)gensToAdvance];
         }
-    } else if (gensToAdvance > 0) {
-        for (stepIdx = 1; stepIdx <= gensToAdvance; stepIdx++) {
-            readPlane = (curPlane + (uint32_t)(stepIdx - 1)) %
-                        (uint32_t)PLANE_COUNT;
-            wp = (curPlane + (uint32_t)stepIdx) % (uint32_t)PLANE_COUNT;
-            cur = [self planePointer:readPlane];
-            write = [self planePointer:wp];
-            if (cur != nil && write != nil) {
-                gol_step_cpu(cur, write, self.gridW, self.gridH, r);
-            }
-        }
-        writePlane = (curPlane + (uint32_t)gensToAdvance) %
-                     (uint32_t)PLANE_COUNT;
-        renderPlane = writePlane;
-        self.displayPlane = writePlane;
-        self.completedPlane = writePlane;
-        willStep = YES;
-        cells = [self planePointer:writePlane];
-        alive = 0;
-        maxAge = 0;
-        if (cells != nil) {
-            gol_count_alive(cells, self.gridW, self.gridH, &alive, &maxAge);
-        }
-        [self setPopulation:(uint32_t)alive maxAge:(uint32_t)maxAge
-           forGeneration:self.gen + (uint32_t)gensToAdvance];
     }
 
     // Skip idle frames: no step this frame and nothing painted since the last
@@ -3474,9 +3440,8 @@ static int paintCount;
         weakSelf = self;
         [cb addCompletedHandler:^(id<MTLCommandBuffer> completedBuffer) {
             App *strongSelf;
-            GOLStats *stats;
-            uint32_t a;
-            uint32_t m;
+            uint32_t a = 0;
+            uint32_t m = 0;
             if (completedBuffer.error != nil) {
                 NSLog(@"command buffer error: %@", completedBuffer.error);
                 return;
@@ -3485,9 +3450,7 @@ static int paintCount;
             if (strongSelf == nil) {
                 return;
             }
-            stats = (GOLStats *)[strongSelf.statsBuf contents];
-            a = stats[writePlane].alive;
-            m = stats[writePlane].maxAge;
+            gol_engine_count(strongSelf.engine, writePlane, &a, &m);
             dispatch_async(dispatch_get_main_queue(), ^{
                 [strongSelf setPopulation:a maxAge:m forGeneration:stepGen];
             });
@@ -3525,6 +3488,13 @@ static int paintCount;
     if (!self.running && !self.dirty) {
         self.mtkView.paused = YES;
     }
+}
+
+- (void)dealloc {
+    gol_engine_destroy(self.engine);
+    self.engine = nil;
+    gol_grid_free(self.grid);
+    self.grid = nil;
 }
 
 - (void)applicationWillTerminate:(NSNotification *)note {

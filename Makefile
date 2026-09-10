@@ -20,6 +20,18 @@ build:
 build/gol.o: src/gol.c | build
 	$(CC) $(CFLAGS) -Isrc -c src/gol.c -o $@
 
+build/gol_grid.o: src/gol_grid.c | build
+	$(CC) $(CFLAGS) -Isrc -c src/gol_grid.c -o $@
+
+build/gol_engine.o: src/gol_engine.c | build
+	$(CC) $(CFLAGS) -Isrc -c src/gol_engine.c -o $@
+
+build/gol_engine_cpu.o: src/gol_engine_cpu.c | build
+	$(CC) $(CFLAGS) -Isrc -c src/gol_engine_cpu.c -o $@
+
+build/gol_engine_metal.o: src/gol_engine_metal.m | build
+	$(CC) $(OBJCFLAGS) -Isrc -c src/gol_engine_metal.m -o $@
+
 build/main.o: src/main.m | build
 	$(CC) $(OBJCFLAGS) -Isrc -c src/main.m -o $@
 
@@ -41,7 +53,8 @@ build/metal_test.o: tests/metal_test.m | build
 build/metal_test: build/metal_test.o build/gol.o | build
 	$(CC) $(OBJCFLAGS) $^ -o $@ $(METAL_FRAMEWORKS)
 
-bin/gol: build/main.o build/gol.o | bin
+bin/gol: build/main.o build/gol.o build/gol_grid.o build/gol_engine.o \
+         build/gol_engine_cpu.o build/gol_engine_metal.o | bin
 	$(CC) $(OBJCFLAGS) $^ -o $@ $(FRAMEWORKS)
 
 bin/default.metallib: shaders.metal | bin build

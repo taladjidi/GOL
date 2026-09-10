@@ -215,6 +215,9 @@ Menu key equivalents, so they work no matter which control has focus.
   loses or duplicates pattern data.
 - **CPU fallback**: when no Metal step pipeline is available, the same
   simulation runs on the CPU (`src/gol.c`), keeping behavior identical.
+- **Backend seam**: step and count dispatch is isolated behind `GOLEngine`
+  (`src/gol_engine*`) with Metal and CPU backends; `GOLGrid`
+  (`src/gol_grid.c`) describes the shared plane buffer.
 
 ## Tests
 
@@ -235,6 +238,8 @@ make test
 ```
 src/main.m        App, UI, camera, Metal setup, render loop (Objective-C)
 src/gol.c/.h      CPU simulation helpers (rules, packing, resize, presets)
+src/gol_grid.c/.h Grid abstraction over the shared plane buffer
+src/gol_engine*   Backend-agnostic step/count engine (Metal and CPU)
 shaders.metal     Step, cell-texture, trail, and scale shaders
 tests/            CPU reference tests and Metal kernel tests
 packaging/        App bundle Info.plist and icon source
