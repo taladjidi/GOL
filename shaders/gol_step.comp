@@ -1,0 +1,113 @@
+#version 450
+
+layout(push_constant) uniform Push {
+    uint gridW;
+    uint gridH;
+    uint readPlane;
+    uint writePlane;
+    uint planeCells;
+    uint birth;
+    uint survival;
+} pc;
+
+layout(set = 0, binding = 0) restrict buffer Grid {
+    uint words[];
+} grid;
+
+layout(set = 0, binding = 1) restrict buffer Stats {
+    uint data[];
+} stats;
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+uint wrapCoord(int v, int m) {
+    int r = v % m;
+    if (r < 0) {
+        r += m;
+    }
+    return uint(r);
+}
+
+uint readCell(uint plane, uint x, uint y) {
+    uint cellIndex = y * pc.gridW + x;
+    uint wordIndex = plane * (pc.planeCells >> 1) + (cellIndex >> 1);
+    uint w = grid.words[wordIndex];
+    if ((cellIndex & 1u) == 0u) {
+        return w & 0xffffu;
+    }
+    return (w >> 16) & 0xffffu;
+}
+
+void writeCell(uint plane, uint x, uint y, uint cell) {
+    uint cellIndex = y * pc.gridW + x;
+    uint wordIndex = plane * (pc.planeCells >> 1) + (cellIndex >> 1);
+    uint mask;
+    uint shift;
+    uint value;
+    uint old;
+
+    if ((cellIndex & 1u) == 0u) {
+        mask = 0xffffu;
+        shift = 0u;
+    } else {
+        mask = 0xffff0000u;
+        shift = 16u;
+    }
+    value = (uint(cell) & 0xffffu) << shift;
+    old = grid.words[wordIndex];
+
+    while (true) {
+        uint next = (old & ~mask) | value;
+        uint prev = atomicCompSwap(grid.words[wordIndex], old, next);
+        if (prev == old) {
+            break;
+        }
+        old = prev;
+    }
+}
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+
+    if (x >= pc.gridW || y >= pc.gridH) {
+        return;
+    }
+
+    int n = 0;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            uint nx;
+            uint ny;
+            uint v;
+            if (dx == 0 && dy == 0) {
+                continue;
+            }
+            nx = wrapCoord(int(x) + dx, int(pc.gridW));
+            ny = wrapCoord(int(y) + dy, int(pc.gridH));
+            v = readCell(pc.readPlane, nx, ny);
+            n += int(v & 1u);
+        }
+    }
+
+    uint v = readCell(pc.readPlane, x, y);
+    bool alive = (v & 1u) != 0u;
+    uint age = (v >> 1) & 0x7fffu;
+
+    bool birth = ((pc.birth >> n) & 1u) != 0u;
+    bool survive = ((pc.survival >> n) & 1u) != 0u;
+
+    uint result = 0u;
+    if (birth || (alive && survive)) {
+        uint newAge = alive ? (age >= 32767u ? 32767u : age + 1u) : 1u;
+        result = 1u | (newAge << 1);
+    }
+
+    writeCell(pc.writePlane, x, y, result);
+
+    if ((result & 1u) != 0u) {
+        uint base = pc.writePlane * 4u;
+        atomicAdd(stats.data[base], 1u);
+        atomicMax(stats.data[base + 1u], (result >> 1) & 0x7fffu);
+    }
+}

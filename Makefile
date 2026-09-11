@@ -1,21 +1,39 @@
+UNAME_S := $(shell uname -s)
+
+ifneq ($(UNAME_S),Darwin)
+CC ?= cc
+CFLAGS ?= -O3 -std=gnu11 -Wall -Wextra -MMD -MP
+VULKAN_CFLAGS ?= $(shell pkg-config --cflags vulkan 2>/dev/null)
+VULKAN_LIBS ?= $(shell pkg-config --libs vulkan 2>/dev/null)
+ifeq ($(VULKAN_LIBS),)
+VULKAN_LIBS = -lvulkan
+endif
+ifneq ($(VULKAN_SDK),)
+VULKAN_CFLAGS += -I$(VULKAN_SDK)/include
+ifeq ($(VULKAN_LIBS),-lvulkan)
+VULKAN_LIBS = -L$(VULKAN_SDK)/lib -lvulkan
+endif
+endif
+else
 CC = clang
 CFLAGS = -O3 -std=gnu11 -Weverything -Wno-poison-system-directories -arch arm64 -arch x86_64 -mmacosx-version-min=12.0 -MMD -MP
 OBJCFLAGS = -O3 -std=gnu11 -Weverything -fobjc-arc -fmodules -Wno-poison-system-directories -arch arm64 -arch x86_64 -mmacosx-version-min=12.0 -MMD -MP
 METALFLAGS = -Weverything -Wno-c++98-compat -Wno-deprecated -mmacosx-version-min=12.0
 FRAMEWORKS = -framework Cocoa -framework Metal -framework MetalKit -framework QuartzCore
 METAL_FRAMEWORKS = -framework Metal
+endif
 
 VERSION = 0.1.0
 
+GLSLC ?= glslc
+
 .DEFAULT_GOAL := all
-
-all: bin/gol bin/default.metallib
-
-bin:
-	@mkdir -p bin
 
 build:
 	@mkdir -p build
+
+bin:
+	@mkdir -p bin
 
 build/gol.o: src/gol.c | build
 	$(CC) $(CFLAGS) -Isrc -c src/gol.c -o $@
@@ -29,11 +47,8 @@ build/gol_engine.o: src/gol_engine.c | build
 build/gol_engine_cpu.o: src/gol_engine_cpu.c | build
 	$(CC) $(CFLAGS) -Isrc -c src/gol_engine_cpu.c -o $@
 
-build/gol_engine_metal.o: src/gol_engine_metal.m | build
-	$(CC) $(OBJCFLAGS) -Isrc -c src/gol_engine_metal.m -o $@
-
-build/main.o: src/main.m | build
-	$(CC) $(OBJCFLAGS) -Isrc -c src/main.m -o $@
+build/gol_engine_vulkan.o: src/gol_engine_vulkan.c | build
+	$(CC) $(CFLAGS) $(VULKAN_CFLAGS) -Isrc -c src/gol_engine_vulkan.c -o $@
 
 build/gol_test.o: tests/gol_test.c | build
 	$(CC) $(CFLAGS) -Isrc -c tests/gol_test.c -o $@
@@ -46,6 +61,36 @@ build/gol_test: build/gol_test.o build/gol.o | build
 
 build/ref_test: build/ref_test.o build/gol.o | build
 	$(CC) $(CFLAGS) $^ -o $@
+
+build/vulkan_test.o: tests/vulkan_test.c | build
+	$(CC) $(CFLAGS) $(VULKAN_CFLAGS) -Isrc -c tests/vulkan_test.c -o $@
+
+build/vulkan_test: build/vulkan_test.o build/gol.o build/gol_grid.o build/gol_engine.o build/gol_engine_vulkan.o | build
+	$(CC) $(CFLAGS) $(VULKAN_LIBS) $^ -o $@
+
+build/gol_step.spv: shaders/gol_step.comp | build
+	$(GLSLC) -O --target-env=vulkan1.0 -o $@ $<
+
+ifneq ($(UNAME_S),Darwin)
+all: build/gol.o build/gol_grid.o build/gol_engine.o build/gol_engine_cpu.o
+
+test: all build/gol_test build/ref_test
+	./build/gol_test
+	./build/ref_test
+
+vulkan-test: all build/vulkan_test build/gol_step.spv
+	./build/vulkan_test build/gol_step.spv
+
+install:
+	@echo "GOL app installation is only supported on macOS"
+else
+all: bin/gol bin/default.metallib
+
+build/gol_engine_metal.o: src/gol_engine_metal.m | build
+	$(CC) $(OBJCFLAGS) -Isrc -c src/gol_engine_metal.m -o $@
+
+build/main.o: src/main.m | build
+	$(CC) $(OBJCFLAGS) -Isrc -c src/main.m -o $@
 
 build/metal_test.o: tests/metal_test.m | build
 	$(CC) $(OBJCFLAGS) -Isrc -c tests/metal_test.m -o $@
@@ -117,10 +162,20 @@ dist: app
 	hdiutil create -volname "GOL" -srcfolder build/dmg -ov -format UDZO dist/GOL-$(VERSION).dmg
 	rm -rf build/dmg
 
+vulkan-test:
+	@echo "Vulkan tests are only available on non-Darwin platforms"
+
 test: all build/gol_test build/ref_test build/metal_test bin/default.metallib
 	./build/gol_test
 	./build/ref_test
 	./build/metal_test bin/default.metallib
+
+# Install the bare binary to /usr/local/bin (also builds the app bundle).
+install: app /usr/local/bin/gol
+
+/usr/local/bin/gol: bin/gol
+	cp $< $@
+endif
 
 clean:
 	rm -rf bin build
@@ -129,12 +184,6 @@ clean:
 distclean: clean
 	rm -rf dist
 
-# Install the bare binary to /usr/local/bin (also builds the app bundle).
-install: app /usr/local/bin/gol
-
-/usr/local/bin/gol: bin/gol
-	cp $< $@
-
-.PHONY: all app run run-bare notarize dist clean distclean install test
+.PHONY: all app run run-bare notarize dist clean distclean install test vulkan-test
 
 -include $(wildcard build/*.d)
