@@ -6,11 +6,21 @@
   <img src="images/header.gif" width="600" alt="Trails mode: a random soup evolving with phosphor-style persistence">
 </p>
 
-A fast, interactive Conway's Game of Life for macOS, rendered entirely with
-Metal. The simulation runs in a GPU compute shader over a triple-buffered
-16-bit cell grid, with an interactive camera (pan/zoom), a famous-rules picker
-with per-neighbor B/S toggles, classic presets, four color palettes, a glow
-effect, and three display modes.
+A fast, interactive Conway's Game of Life for macOS, rendered with Metal. The
+simulation runs in a GPU compute shader over a triple-buffered 16-bit cell
+grid, with an interactive camera (pan/zoom), a famous-rules picker with
+per-neighbor B/S toggles, classic presets, four color palettes, a glow effect,
+and three display modes.
+
+The simulation core is portable and backend-based: the macOS app uses Metal,
+with a CPU fallback, while a separate headless Vulkan compute backend supports
+Linux/Windows-style hosts.
+
+## Documentation
+
+- [Build guide](docs/build.md)
+- [Architecture](docs/architecture.md)
+- [Simulation backends](docs/backends.md)
 
 ## Features
 
@@ -53,10 +63,16 @@ R-Pentomino simulation:
 
 ## Requirements
 
+For the macOS app:
+
 - macOS 12.0 or later, with the Xcode Command Line Tools
   (`xcode-select --install`), which provides `clang`, the Metal SDK, and
   `xcrun`. Both the app and the bare binary are built as universal
   (arm64 + x86_64) executables.
+
+For the portable core and Vulkan backend, see
+[Build](docs/build.md). The non-Darwin build path requires a C compiler and
+`make`; Vulkan is required only for `make vulkan-test`.
 
 ## Build and Run
 
@@ -67,7 +83,7 @@ make run        # builds the app bundle and launches it
 That's all you need for a first run: `make run` assembles `bin/GOL.app`,
 a self-contained app bundle, and opens it.
 
-All targets:
+All macOS targets:
 
 | Target | What it does |
 | --- | --- |
@@ -75,12 +91,18 @@ All targets:
 | `make app` | Build `bin/GOL.app` only (does not launch) |
 | `make run-bare` | Build and run the bare `bin/gol` binary (no bundle) |
 | `make all` *(default)* | Build `bin/gol` and `bin/default.metallib` only |
-| `make test` | Build everything and run the CPU and Metal test suites |
+| `make test` | Build everything and run the CPU, reference, and Metal test suites |
+| `make vulkan-test` | macOS stub; Vulkan tests run on non-Darwin platforms |
 | `make dist` | Write a distributable `dist/GOL-<version>.dmg` |
 | `make notarize` | Sign with a Developer ID and notarize (see [Distribution](#distribution)) |
 | `make install` | Install the `gol` command to `/usr/local/bin` (also builds the app) |
 | `make clean` | Remove `bin/` and `build/` (keeps `dist/`) |
 | `make distclean` | Also remove `dist/` |
+
+On Linux and other non-Darwin platforms, `make` builds the portable core only
+and `make test` runs the CPU/reference suites. `make vulkan-test` builds and
+runs the headless Vulkan backend test. See
+[Build](docs/build.md) for platform details.
 
 `bin/GOL.app` is a self-contained bundle: `Contents/MacOS/gol`,
 `Contents/Resources/default.metallib`, and `GOL.icns`, ad-hoc signed so it
@@ -89,9 +111,10 @@ through Metal's default-library lookup; the bare `bin/gol` binary instead finds
 `default.metallib` next to itself, so it keeps working for scripting and the
 test suite.
 
-The whole project compiles with `-Weverything` (C, Objective-C, and Metal)
-and ships warning-free. Every push is built and tested by CI on a macOS
-runner.
+The macOS build compiles C, Objective-C, and Metal with `-Weverything` and
+ships warning-free. Every push is built and tested by CI on a macOS runner.
+The non-Darwin portable core uses standard C warning flags and does not require
+the macOS toolchain.
 
 ## Distribution
 
@@ -216,13 +239,24 @@ Menu key equivalents, so they work no matter which control has focus.
 - **CPU fallback**: when no Metal step pipeline is available, the same
   simulation runs on the CPU (`src/gol.c`), keeping behavior identical.
 - **Backend seam**: step and count dispatch is isolated behind `GOLEngine`
-  (`src/gol_engine*`) with Metal and CPU backends; `GOLGrid`
-  (`src/gol_grid.c`) describes the shared plane buffer.
+  (`src/gol_engine*`) with CPU, Metal, and Vulkan backends; `GOLGrid`
+  (`src/gol_grid.c`) describes the shared plane buffer. See
+  [Architecture](docs/architecture.md) and
+  [Simulation Backends](docs/backends.md).
 
 ## Tests
 
+On macOS:
+
 ```sh
 make test
+```
+
+On non-Darwin platforms:
+
+```sh
+make test          # CPU and reference tests only
+make vulkan-test   # headless Vulkan backend test
 ```
 
 - `tests/gol_test.c`: rule helpers, cell packing, resize/region copying,
@@ -232,17 +266,21 @@ make test
   beacon, pentadecathlon) and glider/LWSS translation.
 - `tests/metal_test.m`: runs the actual Metal step/trail kernels from the
   built `default.metallib` and compares them against the CPU reference.
+- `tests/vulkan_test.c`: runs the Vulkan compute step and compares it against
+  the CPU reference across rules, grid sizes, and densities.
 
 ## Project Layout
 
 ```
-src/main.m        App, UI, camera, Metal setup, render loop (Objective-C)
-src/gol.c/.h      CPU simulation helpers (rules, packing, resize, presets)
-src/gol_grid.c/.h Grid abstraction over the shared plane buffer
-src/gol_engine*   Backend-agnostic step/count engine (Metal and CPU)
-shaders.metal     Step, cell-texture, trail, and scale shaders
-tests/            CPU reference tests and Metal kernel tests
-packaging/        App bundle Info.plist and icon source
-Makefile          Warning-free build, test, run, and distribution targets
-.github/          CI workflow (build + test on a macOS runner)
+src/main.m              App, UI, camera, Metal setup, render loop (Objective-C)
+src/gol.c/.h            CPU simulation helpers (rules, packing, resize, presets)
+src/gol_grid.c/.h       Grid abstraction over the shared plane buffer
+src/gol_engine*         Backend-agnostic step/count engine (CPU, Metal, Vulkan)
+shaders.metal           Metal step, cell-texture, trail, and scale shaders
+shaders/gol_step.comp   Vulkan compute step shader
+tests/                  CPU, reference, Metal, and Vulkan tests
+docs/                   Build, architecture, and backend documentation
+packaging/              App bundle Info.plist and icon source
+Makefile                Platform-aware build, test, run, and distribution targets
+.github/                CI workflow (build + test on a macOS runner)
 ```
